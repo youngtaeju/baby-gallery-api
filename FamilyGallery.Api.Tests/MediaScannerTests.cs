@@ -16,6 +16,9 @@ public sealed class MediaScannerTests
 {
     private static readonly DateTime CapturedLocal = new(2026, 3, 15, 13, 5, 6, DateTimeKind.Unspecified);
 
+    // mvhd의 생성 시각은 규격상 UTC.
+    private static readonly DateTime MovieCreatedUtc = new(2026, 8, 8, 10, 23, 41, DateTimeKind.Utc);
+
     [Fact]
     public async Task 스캔하면_화이트리스트_확장자만_인덱싱()
     {
@@ -130,6 +133,79 @@ public sealed class MediaScannerTests
 
         Assert.Equal((800, 600), (upright.Width, upright.Height));
         Assert.Equal((600, 800), (rotated.Width, rotated.Height));
+    }
+
+    [Fact]
+    public async Task 영상은_mvhd에서_촬영일시와_재생시간과_해상도_추출()
+    {
+        using var factory = new ApiFactory();
+
+        WriteGalleryFile(factory, "clip.mp4", MediaFixtures.CreateMp4(
+            createdAt: MovieCreatedUtc,
+            duration: TimeSpan.FromSeconds(2.91),
+            width: 1920,
+            height: 1440));
+
+        await factory.ScanAsync();
+
+        var item = Assert.Single(await ReadIndexAsync(factory));
+
+        Assert.Equal(MediaType.Video, item.MediaType);
+        Assert.Equal(MovieCreatedUtc, item.CapturedAt);
+        Assert.Equal(2910, item.DurationMs);
+        Assert.Equal((1920, 1440), (item.Width, item.Height));
+    }
+
+    [Fact]
+    public async Task 해상도가_0인_오디오_트랙은_건너뛰고_영상_트랙_채택()
+    {
+        // 오디오 트랙의 tkhd도 폭·높이 태그를 갖되 값이 0. 픽스처는 오디오를 영상보다 앞에 배치.
+        using var factory = new ApiFactory();
+
+        WriteGalleryFile(factory, "with-audio.mp4", MediaFixtures.CreateMp4(width: 1280, height: 720));
+        WriteGalleryFile(factory, "video-only.mp4", MediaFixtures.CreateMp4(width: 1280, height: 720, includeAudioTrack: false, filler: 0x01));
+
+        await factory.ScanAsync();
+
+        var items = await ReadIndexAsync(factory);
+
+        Assert.Equal(2, items.Count);
+        Assert.All(items, item => Assert.Equal((1280, 720), (item.Width, item.Height)));
+    }
+
+    [Theory]
+    [InlineData(TrackRotation.None, 1920, 1440)]
+    [InlineData(TrackRotation.Plus90, 1440, 1920)]
+    [InlineData(TrackRotation.Minus180, 1920, 1440)]
+    public async Task 영상은_회전각이_세로_전환일_때만_해상도_교환(TrackRotation rotation, int expectedWidth, int expectedHeight)
+    {
+        using var factory = new ApiFactory();
+
+        WriteGalleryFile(factory, "clip.mp4", MediaFixtures.CreateMp4(width: 1920, height: 1440, rotation: rotation));
+
+        await factory.ScanAsync();
+
+        var item = Assert.Single(await ReadIndexAsync(factory));
+
+        Assert.Equal((expectedWidth, expectedHeight), (item.Width, item.Height));
+    }
+
+    [Fact]
+    public async Task 영상_촬영일시가_성립하지_않으면_mtime으로_대체()
+    {
+        using var factory = new ApiFactory();
+
+        var modifiedAt = new DateTime(2025, 7, 1, 9, 30, 0, DateTimeKind.Utc);
+
+        // 생성 시각을 지정하지 않으면 mvhd에 QuickTime 기준시(1904-01-01)가 기록됨.
+        WriteGalleryFile(factory, "clip.mp4", MediaFixtures.CreateMp4(), modifiedAt);
+
+        await factory.ScanAsync();
+
+        var item = Assert.Single(await ReadIndexAsync(factory));
+
+        Assert.Equal(modifiedAt, item.CapturedAt);
+        Assert.Null(item.DurationMs);
     }
 
     [Fact]
