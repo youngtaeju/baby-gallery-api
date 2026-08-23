@@ -10,6 +10,7 @@
 ## 요구 사항
 
 - .NET SDK 10.0
+- ffmpeg (썸네일 생성. 배포 이미지에는 포함되어 있으며 로컬 실행 시 `PATH`에 필요)
 - (배포) Docker / Docker Compose
 
 ## 프로젝트 구조

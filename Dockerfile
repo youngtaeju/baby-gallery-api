@@ -10,6 +10,13 @@ RUN dotnet publish FamilyGallery.Api/FamilyGallery.Api.csproj \
     -c Release -o /app/publish --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+
+# 썸네일 생성용. 이미지와 영상을 단일 경로로 처리.
+# 소스와 무관한 레이어라 publish 복사보다 앞에 두어 재빌드 시 재사용.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build /app/publish .
 
