@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using FamilyGallery.Api.Endpoints;
@@ -193,6 +195,187 @@ public sealed class MediaEndpointsTests
             Assert.DoesNotContain("relativePath", json, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("contentHash", json, StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    [Fact]
+    public async Task 원본_인증이_없으면_401()
+    {
+        using var factory = new ApiFactory();
+
+        var response = await factory.CreateClient().GetAsync("/media/1/original", TestToken);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 원본_없는_id면_404()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var response = await client.GetAsync("/media/9999/original", TestToken);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 원본_전체_바이트와_내용_기반_ETag_반환()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var content = MediaFixtures.CreateJpeg(800, 600);
+        var id = await AddGalleryFileAsync(factory, client, "2026/photo.jpg", content);
+
+        var response = await client.GetAsync($"/media/{id}/original", TestToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(content, await response.Content.ReadAsByteArrayAsync(TestToken));
+        Assert.Equal(content.Length, response.Content.Headers.ContentLength);
+
+        // ETag는 원본 내용의 SHA-256. 파일이 바뀌면 스캐너가 갱신하므로 ETag도 따라감.
+        Assert.Equal($"\"{Convert.ToHexStringLower(SHA256.HashData(content))}\"", response.Headers.ETag?.ToString());
+
+        Assert.Equal("bytes", Assert.Single(response.Headers.AcceptRanges));
+        Assert.True(response.Headers.CacheControl?.Private);
+        Assert.Equal(TimeSpan.FromDays(7), response.Headers.CacheControl?.MaxAge);
+    }
+
+    [Theory]
+    [InlineData("photo.jpg", "image/jpeg")]
+    [InlineData("clip.mp4", "video/mp4")]
+    [InlineData("clip.mov", "video/quicktime")]
+    public async Task 원본_확장자에_맞는_Content_Type_반환(string fileName, string expected)
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, fileName, MediaFixtures.CreateOpaqueBytes(fileName));
+
+        var response = await client.GetAsync($"/media/{id}/original", TestToken);
+
+        Assert.Equal(expected, response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task 원본_Range_요청이면_206과_해당_구간만_반환()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var content = MediaFixtures.CreateJpeg(800, 600);
+        var id = await AddGalleryFileAsync(factory, client, "clip.jpg", content);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/media/{id}/original");
+        request.Headers.Range = new RangeHeaderValue(0, 9);
+
+        var response = await client.SendAsync(request, TestToken);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal(content[..10], await response.Content.ReadAsByteArrayAsync(TestToken));
+        Assert.Equal(content.Length, response.Content.Headers.ContentRange?.Length);
+    }
+
+    [Fact]
+    public async Task 원본_범위를_벗어난_Range면_416()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var content = MediaFixtures.CreateJpeg(800, 600);
+        var id = await AddGalleryFileAsync(factory, client, "clip.jpg", content);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/media/{id}/original");
+        request.Headers.Range = new RangeHeaderValue(content.Length + 100, null);
+
+        var response = await client.SendAsync(request, TestToken);
+
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 원본_ETag가_일치하면_304()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", MediaFixtures.CreateJpeg(800, 600));
+
+        var first = await client.GetAsync($"/media/{id}/original", TestToken);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/media/{id}/original");
+        request.Headers.IfNoneMatch.Add(first.Headers.ETag!);
+
+        var response = await client.SendAsync(request, TestToken);
+
+        Assert.Equal(HttpStatusCode.NotModified, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 원본_파일이_사라졌으면_404()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", MediaFixtures.CreateJpeg(800, 600));
+
+        // 인덱스에는 남아 있으나 파일만 사라진 상태. 다음 스캔 전까지 이 상태가 유지됨.
+        File.Delete(Path.Combine(factory.GalleryPath, "photo.jpg"));
+
+        var response = await client.GetAsync($"/media/{id}/original", TestToken);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 원본_갤러리_루트를_벗어나는_경로면_404()
+    {
+        using var factory = new ApiFactory();
+
+        // 스캐너는 이런 값을 만들지 않음. 인덱스가 오염돼도 원본 트리 밖을 열지 않는지 확인.
+        var outside = Path.GetFullPath(Path.Combine(factory.GalleryPath, "..", "outside.jpg"));
+
+        MediaFixtures.Write(outside, MediaFixtures.CreateJpeg(800, 600));
+
+        // 파일이 실제로 존재해야 경로 검증이 유일한 차단 수단이 됨.
+        Assert.True(File.Exists(outside));
+
+        var ids = await factory.AddMediaAsync(("../outside.jpg", SharedCapturedAt));
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var response = await client.GetAsync($"/media/{ids[0]}/original", TestToken);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 원본_HEAD_요청이면_본문_없이_헤더만_반환()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var content = MediaFixtures.CreateJpeg(800, 600);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", content);
+
+        using var request = new HttpRequestMessage(HttpMethod.Head, $"/media/{id}/original");
+
+        var response = await client.SendAsync(request, TestToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(content.Length, response.Content.Headers.ContentLength);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestToken));
+    }
+
+    // 스트리밍은 파일과 인덱스 행이 함께 있어야 함. 인덱싱을 거쳐 실제 ContentHash를 남김.
+    private static async Task<int> AddGalleryFileAsync(ApiFactory factory, HttpClient client, string relativePath, byte[] content)
+    {
+        MediaFixtures.Write(Path.Combine(factory.GalleryPath, relativePath), content);
+
+        await factory.ScanAsync();
+
+        var page = await ReadPageAsync(client, "/media");
+
+        return page.Items.Single(i => i.FileName == Path.GetFileName(relativePath)).Id;
     }
 
     private static Task SeedAsync(ApiFactory factory, int count)
