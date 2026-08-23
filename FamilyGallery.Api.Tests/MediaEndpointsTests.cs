@@ -10,7 +10,10 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using FamilyGallery.Api.Endpoints;
+using MetadataExtractor;
+using MetadataExtractor.Formats.WebP;
 using Xunit;
+using Directory = System.IO.Directory;
 
 namespace FamilyGallery.Api.Tests;
 
@@ -364,6 +367,204 @@ public sealed class MediaEndpointsTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(content.Length, response.Content.Headers.ContentLength);
         Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestToken));
+    }
+
+    [Fact]
+    public async Task 썸네일_인증이_없으면_401()
+    {
+        using var factory = new ApiFactory();
+
+        var response = await factory.CreateClient().GetAsync("/media/1/thumbnail", TestToken);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 썸네일_없는_id면_404()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var response = await client.GetAsync("/media/9999/thumbnail", TestToken);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 썸네일_이미지에서_긴_변_512로_축소해_생성()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", FfmpegFixtures.CreateJpeg(1600, 1200));
+
+        var response = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("image/webp", response.Content.Headers.ContentType?.MediaType);
+        Assert.True(response.Headers.CacheControl?.Private);
+
+        var (width, height) = ReadWebPSize(await response.Content.ReadAsByteArrayAsync(TestToken));
+
+        Assert.Equal((512, 384), (width, height));
+
+        // 디스크 캐시에 남아야 다음 요청에서 재생성이 없음.
+        Assert.Single(Directory.GetFiles(factory.ThumbnailPath, "*.webp", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task 썸네일_원본이_규격보다_작으면_확대하지_않음()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "small.jpg", FfmpegFixtures.CreateJpeg(320, 240));
+
+        var response = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        Assert.Equal((320, 240), ReadWebPSize(await response.Content.ReadAsByteArrayAsync(TestToken)));
+    }
+
+    [Fact]
+    public async Task 썸네일_EXIF_회전_이미지는_표시_방향으로_생성()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+
+        // orientation 6은 시계 방향 90도 회전. 가로 원본이 세로 썸네일로 나와야 함.
+        var content = MediaFixtures.InsertExifSegment(
+            FfmpegFixtures.CreateJpeg(1600, 1200),
+            SharedCapturedAt,
+            orientation: 6,
+            width: 1600,
+            height: 1200);
+
+        var id = await AddGalleryFileAsync(factory, client, "rotated.jpg", content);
+
+        var response = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal((384, 512), ReadWebPSize(await response.Content.ReadAsByteArrayAsync(TestToken)));
+    }
+
+    [Fact]
+    public async Task 썸네일_영상에서도_생성()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "clip.mp4", FfmpegFixtures.CreateMp4(640, 480, 3));
+
+        var response = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal((512, 384), ReadWebPSize(await response.Content.ReadAsByteArrayAsync(TestToken)));
+    }
+
+    [Fact]
+    public async Task 썸네일_재요청_시_다시_생성하지_않음()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", FfmpegFixtures.CreateJpeg(800, 600));
+
+        await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        var cached = Directory.GetFiles(factory.ThumbnailPath, "*.webp", SearchOption.AllDirectories).Single();
+        var createdAt = File.GetLastWriteTimeUtc(cached);
+
+        var response = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // 재생성이 있었다면 임시 파일을 옮겨 쓰면서 mtime이 갱신됨.
+        Assert.Equal(createdAt, File.GetLastWriteTimeUtc(cached));
+    }
+
+    [Fact]
+    public async Task 썸네일_ETag가_일치하면_304()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", FfmpegFixtures.CreateJpeg(800, 600));
+
+        var first = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/media/{id}/thumbnail");
+        request.Headers.IfNoneMatch.Add(first.Headers.ETag!);
+
+        var response = await client.SendAsync(request, TestToken);
+
+        Assert.Equal(HttpStatusCode.NotModified, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 썸네일_원본과_ETag가_다름()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", FfmpegFixtures.CreateJpeg(800, 600));
+
+        var original = await client.GetAsync($"/media/{id}/original", TestToken);
+        var thumbnail = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        // 규격 토큰이 붙어 두 응답의 캐시 항목이 섞이지 않음.
+        Assert.NotEqual(original.Headers.ETag?.Tag, thumbnail.Headers.ETag?.Tag);
+    }
+
+    [Fact]
+    public async Task 썸네일_디코딩할_수_없는_파일이면_404()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+
+        // 확장자만 미디어이고 내용은 디코딩 불가. 인덱싱은 되지만 썸네일은 만들 수 없음.
+        var id = await AddGalleryFileAsync(factory, client, "broken.jpg", MediaFixtures.CreateOpaqueBytes("broken"));
+
+        var response = await client.GetAsync($"/media/{id}/thumbnail", TestToken);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        // 실패를 캐시에 남기지 않아 다음 요청에 다시 시도됨.
+        Assert.False(Directory.Exists(factory.ThumbnailPath)
+            && Directory.GetFiles(factory.ThumbnailPath, "*.webp", SearchOption.AllDirectories).Length > 0);
+    }
+
+    [Fact]
+    public async Task 썸네일_동시_요청에도_온전한_결과_반환()
+    {
+        using var factory = new ApiFactory();
+
+        var client = await CreateAuthorizedClientAsync(factory);
+        var id = await AddGalleryFileAsync(factory, client, "photo.jpg", FfmpegFixtures.CreateJpeg(1600, 1200));
+
+        var responses = await Task.WhenAll(
+            Enumerable.Range(0, 8).Select(_ => client.GetAsync($"/media/{id}/thumbnail", TestToken)));
+
+        foreach (var response in responses)
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal((512, 384), ReadWebPSize(await response.Content.ReadAsByteArrayAsync(TestToken)));
+        }
+
+        Assert.Single(Directory.GetFiles(factory.ThumbnailPath, "*.webp", SearchOption.AllDirectories));
+    }
+
+    // 응답 바이트를 다시 읽어 규격을 확인. API 프로젝트가 참조하는 MetadataExtractor를 그대로 사용.
+    private static (int Width, int Height) ReadWebPSize(byte[] content)
+    {
+        using var stream = new MemoryStream(content);
+
+        var directory = ImageMetadataReader.ReadMetadata(stream).OfType<WebPDirectory>().Single();
+
+        return (
+            directory.GetInt32(WebPDirectory.TagImageWidth),
+            directory.GetInt32(WebPDirectory.TagImageHeight));
     }
 
     // 스트리밍은 파일과 인덱스 행이 함께 있어야 함. 인덱싱을 거쳐 실제 ContentHash를 남김.

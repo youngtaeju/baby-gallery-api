@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using FamilyGallery.Api.Data;
 using FamilyGallery.Api.Data.Entities;
 using FamilyGallery.Api.Options;
+using FamilyGallery.Api.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -29,6 +30,10 @@ public static class MediaEndpoints
     private const string InvalidCursorMessage = "cursor 값이 올바르지 않습니다.";
 
     private const string MediaNotFoundMessage = "미디어를 찾을 수 없습니다.";
+
+    private const string ThumbnailUnavailableMessage = "썸네일을 생성할 수 없습니다.";
+
+    private const string ThumbnailContentType = "image/webp";
 
     // API 경유 원본 변경 경로 부재로 장기 캐시 적용.
     // DSM·SMB 직접 교체 시 max-age 동안 이전 응답 유지 가능.
@@ -59,6 +64,7 @@ public static class MediaEndpoints
 
         // HEAD는 영상 플레이어가 재생 전에 길이와 Range 지원 여부를 조회하는 경우 대비.
         group.MapMethods("/{id:int}/original", ["GET", "HEAD"], GetOriginalAsync).WithName("GetMediaOriginal");
+        group.MapGet("/{id:int}/thumbnail", GetThumbnailAsync).WithName("GetMediaThumbnail");
 
         return app;
     }
@@ -136,6 +142,40 @@ public static class MediaEndpoints
             ResolveContentType(item.RelativePath),
             entityTag: new EntityTagHeaderValue($"\"{item.ContentHash}\""),
             enableRangeProcessing: true);
+    }
+
+    private static async Task<IResult> GetThumbnailAsync(
+        int id,
+        HttpContext context,
+        AppDbContext db,
+        IOptions<GalleryOptions> galleryOptions,
+        ThumbnailService thumbnails,
+        CancellationToken cancellationToken)
+    {
+        var item = await db.MediaItems.AsNoTracking().SingleOrDefaultAsync(m => m.Id == id, cancellationToken);
+
+        if (item is null
+            || !TryResolveGalleryPath(galleryOptions.Value.RootPath, item.RelativePath, out var sourcePath)
+            || !File.Exists(sourcePath))
+        {
+            return Results.Problem(detail: MediaNotFoundMessage, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var thumbnailPath = await thumbnails.GetOrCreateAsync(item, sourcePath, cancellationToken);
+
+        // 손상 파일이나 디코딩 불가 포맷. 실패를 캐시에 남기지 않아 다음 요청에 다시 시도됨.
+        if (thumbnailPath is null)
+        {
+            return Results.Problem(detail: ThumbnailUnavailableMessage, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        context.Response.Headers.CacheControl = CacheControl;
+
+        // 규격 토큰을 포함해 크기·품질이 바뀌면 클라이언트 캐시가 함께 무효화됨.
+        return Results.File(
+            thumbnailPath,
+            ThumbnailContentType,
+            entityTag: new EntityTagHeaderValue($"\"{item.ContentHash}-{ThumbnailService.SpecToken}\""));
     }
 
     // RelativePath는 스캐너가 기록한 값이지만 인덱스 오염에 대비해 원본 트리 하위인지 확인.

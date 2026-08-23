@@ -60,11 +60,19 @@ public class Program
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
+        builder.Services.AddOptions<ThumbnailOptions>()
+            .BindConfiguration(ThumbnailOptions.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
         builder.Services.AddDbContext<AppDbContext>(options =>
             options.UseSqlite(builder.Configuration.GetConnectionString("Default")));
 
         builder.Services.AddSingleton<TokenService>();
         builder.Services.AddSingleton<MediaMetadataReader>();
+
+        // 생성 중복 제거와 동시 실행 제한 상태를 인스턴스에 보관. 요청마다 새로 만들면 무의미해짐.
+        builder.Services.AddSingleton<ThumbnailService>();
         builder.Services.AddScoped<MediaScanner>();
 
         // TLS 종료는 Cloudflare Tunnel 담당. 컨테이너는 평문 HTTP만 수신하므로 HTTPS 리디렉션 없음.

@@ -132,6 +132,30 @@ public static class MediaFixtures
         return mp4.ToArray();
     }
 
+    /// <summary>
+    /// 기존 JPEG의 SOI 뒤에 EXIF APP1 세그먼트 삽입.
+    /// FfmpegFixtures가 만든 디코딩 가능한 이미지에 orientation을 부여할 때 사용.
+    /// </summary>
+    public static byte[] InsertExifSegment(
+        byte[] jpeg,
+        DateTime capturedAt,
+        ushort orientation,
+        int width,
+        int height,
+        string? utcOffset = null)
+    {
+        var segment = BuildExifSegment(capturedAt, utcOffset, orientation, width, height);
+
+        using var result = new MemoryStream(jpeg.Length + segment.Length);
+
+        // SOI(0xFFD8) 직후가 APP1의 자리.
+        result.Write(jpeg.AsSpan(0, 2));
+        result.Write(segment);
+        result.Write(jpeg.AsSpan(2));
+
+        return result.ToArray();
+    }
+
     // 메타데이터 추출 실패 시 mtime 대체 경로 검증용.
     public static byte[] CreateOpaqueBytes(string seed)
     {
@@ -186,12 +210,26 @@ public static class MediaFixtures
         int width,
         int height)
     {
+        stream.Write(BuildExifSegment(capturedAt, utcOffset, orientation, width, height));
+    }
+
+    private static byte[] BuildExifSegment(
+        DateTime capturedAt,
+        string? utcOffset,
+        ushort orientation,
+        int width,
+        int height)
+    {
         var tiff = BuildTiff(capturedAt, utcOffset, orientation, width, height);
 
-        WriteMarker(stream, 0xE1);
-        WriteBigEndianUInt16(stream, (ushort)(2 + 6 + tiff.Length));
-        stream.Write(Encoding.ASCII.GetBytes("Exif\0\0"));
-        stream.Write(tiff);
+        using var segment = new MemoryStream();
+
+        WriteMarker(segment, 0xE1);
+        WriteBigEndianUInt16(segment, (ushort)(2 + 6 + tiff.Length));
+        segment.Write(Encoding.ASCII.GetBytes("Exif\0\0"));
+        segment.Write(tiff);
+
+        return segment.ToArray();
     }
 
     private static byte[] BuildTiff(
