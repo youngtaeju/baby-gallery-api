@@ -157,6 +157,38 @@ public sealed class MediaScannerTests
     }
 
     [Fact]
+    public async Task 영상에_creationdate가_있으면_mvhd보다_우선()
+    {
+        // 표준시 구성과 무관하게 태그에 실린 오프셋이 우선함을 확인.
+        using var factory = new ApiFactory(timeZone: "UTC");
+
+        // mvhd는 촬영 시각이 아닌 파일 기록 시각이라 8분가량 뒤로 어긋남.
+        WriteGalleryFile(factory, "clip.mp4", MediaFixtures.CreateMp4(
+            createdAt: MovieCreatedUtc,
+            appleCreationDate: "2026-08-08T19:15:31+0900"));
+
+        await factory.ScanAsync();
+
+        var item = Assert.Single(await ReadIndexAsync(factory));
+
+        Assert.Equal(new DateTime(2026, 8, 8, 10, 15, 31, DateTimeKind.Utc), item.CapturedAt);
+    }
+
+    [Fact]
+    public async Task 영상_creationdate에_오프셋이_없으면_구성된_표준시로_해석()
+    {
+        using var factory = new ApiFactory(timeZone: "Asia/Seoul");
+
+        WriteGalleryFile(factory, "clip.mp4", MediaFixtures.CreateMp4(appleCreationDate: "2026-08-08T19:15:31"));
+
+        await factory.ScanAsync();
+
+        var item = Assert.Single(await ReadIndexAsync(factory));
+
+        Assert.Equal(new DateTime(2026, 8, 8, 10, 15, 31, DateTimeKind.Utc), item.CapturedAt);
+    }
+
+    [Fact]
     public async Task 해상도가_0인_오디오_트랙은_건너뛰고_영상_트랙_채택()
     {
         // 오디오 트랙의 tkhd도 폭·높이 태그를 갖되 값이 0. 픽스처는 오디오를 영상보다 앞에 배치.
