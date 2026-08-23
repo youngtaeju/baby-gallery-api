@@ -120,15 +120,36 @@ public sealed class MediaMetadataReader
         return DateTime.SpecifyKind(local - _fallbackTimeZone.GetUtcOffset(local), DateTimeKind.Utc);
     }
 
-    // QuickTime 규격상 mvhd의 생성 시각은 UTC.
-    // 다만 Apple 기기는 기기 로컬시간을 기록하는 편차가 있어 해당 영상의 촬영일시는 기기 오프셋만큼 어긋남.
-    private static DateTime? ReadQuickTimeCapturedAt(IReadOnlyList<Directory> directories)
+    // mvhd의 생성 시각은 QuickTime 규격상 UTC이나 촬영 시각이 아닌 파일 기록 시각.
+    // Apple 기기는 com.apple.quicktime.creationdate에 오프셋을 포함한 촬영일시를 따로 기록하므로 이를 우선 채택.
+    private DateTime? ReadQuickTimeCapturedAt(IReadOnlyList<Directory> directories)
     {
+        var metadata = directories.OfType<QuickTimeMetadataHeaderDirectory>().FirstOrDefault();
+
+        // 값이 DateTime으로 해석되지 않은 경우는 mvhd로 넘김. 검증되지 않은 문자열 파싱 경로를 두지 않음.
+        if (metadata?.GetObject(QuickTimeMetadataHeaderDirectory.TagCreationDate) is DateTime creationDate)
+        {
+            return ToUtc(creationDate);
+        }
+
         var header = directories.OfType<QuickTimeMovieHeaderDirectory>().FirstOrDefault();
 
         return header is not null && header.TryGetDateTime(QuickTimeMovieHeaderDirectory.TagCreated, out var created)
             ? DateTime.SpecifyKind(created, DateTimeKind.Utc)
             : null;
+    }
+
+    // 오프셋을 포함한 값은 Local로 파싱됨. SpecifyKind로 덮으면 오프셋만큼 어긋남.
+    private DateTime ToUtc(DateTime value)
+    {
+        return value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+
+            // ConvertTimeToUtc는 DST 전환 구간의 값에 예외를 던짐. 오프셋 직접 조회로 회피.
+            _ => DateTime.SpecifyKind(value - _fallbackTimeZone.GetUtcOffset(value), DateTimeKind.Utc)
+        };
     }
 
     // MetadataExtractor가 timescale을 반영해 TimeSpan으로 정규화. 수치 조회 API로는 얻을 수 없음.
@@ -160,7 +181,7 @@ public sealed class MediaMetadataReader
 
             // 세로로 촬영한 영상은 tkhd에 가로 해상도와 회전각이 따로 실림.
             if (track.TryGetDouble(QuickTimeTrackHeaderDirectory.TagRotation, out var rotation)
-                && (IsNear(rotation, 90) || IsNear(rotation, 270)))
+                && IsQuarterTurnRotation(rotation))
             {
                 (width, height) = (height, width);
             }
@@ -226,9 +247,10 @@ public sealed class MediaMetadataReader
             : null;
     }
 
-    // 회전각은 double로 보고됨. 부동소수 오차를 감안한 비교.
-    private static bool IsNear(double value, double target)
+    // 음수 회전각까지 처리하도록 180도 주기로 정규화해 90도 회전 여부 판정.
+    // double 값의 부동소수 오차를 고려한 허용 범위 비교.
+    private static bool IsQuarterTurnRotation(double rotation)
     {
-        return Math.Abs(value - target) < 1;
+        return Math.Abs(Math.Abs(rotation % 180) - 90) < 1;
     }
 }

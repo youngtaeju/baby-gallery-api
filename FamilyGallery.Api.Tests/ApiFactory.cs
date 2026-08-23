@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -31,6 +31,9 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     // 스캔 대상과 SQLite 파일을 분리. 스캐너 순회에 DB 파일이 섞이지 않음.
     public string GalleryPath { get; }
 
+    // 캐시 적중·재생성 여부를 파일로 직접 확인하기 위해 노출.
+    public string ThumbnailPath { get; }
+
     private readonly string? _timeZone;
 
     // xUnit의 IClassFixture는 무인자 생성자만 활성화 가능. 선택적 매개변수로는 대체되지 않음.
@@ -48,6 +51,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         _rootPath = Path.Combine(Path.GetTempPath(), $"fg-test-{Guid.NewGuid():N}");
         GalleryPath = Path.Combine(_rootPath, "gallery");
         Directory.CreateDirectory(GalleryPath);
+        ThumbnailPath = Path.Combine(_rootPath, "thumbnails");
         _databasePath = Path.Combine(_rootPath, "test.db");
 
         // Services 접근 시 호스트가 생성되며 ConfigureWebHost가 적용됨.
@@ -81,7 +85,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         {
             ["ConnectionStrings:Default"] = $"Data Source={_databasePath}",
             ["Jwt:SigningKey"] = SigningKey,
-            ["Gallery:RootPath"] = GalleryPath
+            ["Gallery:RootPath"] = GalleryPath,
+            ["Thumbnail:CachePath"] = ThumbnailPath
         };
 
         // 시간대 지정 시에만 기본 설정 덮어씀.

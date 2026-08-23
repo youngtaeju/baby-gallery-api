@@ -10,6 +10,7 @@
 ## 요구 사항
 
 - .NET SDK 10.0
+- ffmpeg (썸네일 생성. 로컬 실행 시 `PATH`에 필요하며 배포 이미지에는 포함)
 - (배포) Docker / Docker Compose
 
 ## 프로젝트 구조
@@ -21,14 +22,16 @@ global.json           dotnet test 러너 지정
 FamilyGallery.slnx
 FamilyGallery.Api/
   Program.cs          서비스 등록 / 파이프라인 / DB 초기화
-  Options/            JwtOptions, GalleryOptions
+  Options/            Jwt, Gallery, Indexing, Thumbnail 설정 바인딩
   Data/               AppDbContext, Entities, 값 변환기
   Migrations/         EF Core 마이그레이션
   Endpoints/          엔드포인트 매핑 확장 메서드
-  Services/           토큰 발급
+  Services/           토큰 발급, 미디어 인덱싱, 썸네일 생성
   Cli/                계정 관리 명령
 FamilyGallery.Api.Tests/
   ApiFactory.cs       테스트용 호스트 / 임시 DB
+  MediaFixtures.cs    JPEG·MP4 바이트 조립
+  FfmpegFixtures.cs   디코딩 가능한 미디어 생성
   *Tests.cs           통합 테스트
 Dockerfile
 docker-compose.yml    NAS 배포용
@@ -87,14 +90,48 @@ user set-password <username>
 로컬:
 
 ```powershell
-dotnet run --project FamilyGallery.Api -- user add dad --display-name "{이름}" --role editor
+dotnet run --project FamilyGallery.Api -- user add {계정명} --display-name "{표시 이름}" --role editor
 ```
 
 컨테이너 (비밀번호 입력을 위해 `-it` 필요):
 
 ```bash
-docker compose exec -it api dotnet FamilyGallery.Api.dll user add dad --display-name "{이름}" --role editor
+docker compose exec -it api dotnet FamilyGallery.Api.dll user add {계정명} --display-name "{표시 이름}" --role editor
 ```
+
+## 미디어
+
+전 엔드포인트 인증 필요. 조회 범위는 권한과 무관하게 동일.
+
+| 엔드포인트 | 설명 |
+| --- | --- |
+| `GET /media` | 촬영일시 내림차순 목록. 커서 페이징 |
+| `GET /media/{id}` | 단건 조회 |
+| `GET`·`HEAD /media/{id}/original` | 원본 바이너리. `Range` 요청 지원 |
+| `GET /media/{id}/thumbnail` | 썸네일. 긴 변 512px WebP |
+
+- 응답에 NAS 경로와 내용 해시 미노출. 미디어 참조는 `id` 기반이며 원본·썸네일 URL도 `id`에서 도출
+- 목록은 `limit` 기본 `50`, 최대 `200`. `nextCursor`를 그대로 다음 요청에 전달하고 `null`이면 마지막 페이지
+- 원본은 `Range` 처리로 `206` / `416` 응답. `ETag`는 원본 내용의 SHA-256이며 파일 교체 시 스캔으로 갱신
+- 썸네일은 요청 시점에 생성해 디스크에 캐시. 생성 실패는 `404`이고 다음 요청에 다시 시도
+- 원본·썸네일 모두 `Cache-Control: private, max-age=604800`. 썸네일 `ETag`에는 규격 토큰이 붙어 크기·품질 변경 시 함께 무효화
+- 인덱스에 있어도 파일이 없으면 `404`
+- 서버 측 실시간 트랜스코딩 없음
+
+**HEIC·HEIF 썸네일 미지원.** 배포 이미지의 ffmpeg가 6.1.1이고 HEIC 디먹싱은 7.1부터 추가됨.
+인덱싱·목록·원본 조회는 정상 동작하며 썸네일 요청만 `404` 응답.
+
+### 인덱싱
+
+목록은 파일시스템 순회가 아닌 DB 인덱스 기반. DSM·SMB로 직접 투입한 파일은 백그라운드 스캐너가 따라감.
+
+- 기동 직후 1회 실행 후 `Indexing:IntervalMinutes` 주기 반복
+- `.`으로 시작하는 디렉터리와 심볼릭 링크는 순회에서 제외
+- 확장자 화이트리스트: `.jpg` `.jpeg` `.png` `.gif` `.webp` `.heic` `.heif` `.mp4` `.mov` `.m4v`
+- 내용이 같은 파일은 한 번만 인덱싱
+- 촬영일시는 이미지 EXIF와 영상 QuickTime 메타에서 추출. 없으면 파일 mtime으로 대체
+  - 오프셋 정보가 없는 촬영일시에는 `Indexing:TimeZone` 적용
+- 해상도는 표시 방향 기준. 회전 정보를 반영해 교환
 
 ## 설정
 
@@ -107,6 +144,12 @@ docker compose exec -it api dotnet FamilyGallery.Api.dll user add dad --display-
 | `Jwt:AccessTokenMinutes` | access token 유효 시간(분) | `30` |
 | `Jwt:RefreshTokenDays` | refresh token 유효 기간(일) | `60` |
 | `Gallery:RootPath` | NAS 마운트 경로 (읽기·쓰기) | `/data/gallery` |
+| `Indexing:IntervalMinutes` | 스캔 주기(분) | `10` |
+| `Indexing:TimeZone` | 오프셋 태그가 없는 촬영일시에 적용할 표준시 | `Asia/Seoul` |
+| `Thumbnail:CachePath` | 썸네일 디스크 캐시 루트 | `/data/app/thumbnails` |
+| `Thumbnail:FfmpegPath` | ffmpeg 실행 파일 경로 | `ffmpeg` |
+| `Thumbnail:MaxConcurrency` | 동시 생성 수 상한 | `2` |
+| `Thumbnail:TimeoutSeconds` | 개별 생성 제한 시간(초) | `30` |
 
 - `Jwt:SigningKey`는 설정 파일에 미포함. 운영은 환경변수 `Jwt__SigningKey`, 로컬은 user-secrets 사용
 - `ValidateOnStart` 적용. 필수 설정 누락 시 기동 단계에서 실패
@@ -154,7 +197,7 @@ dotnet run --project FamilyGallery.Api
 - `http://localhost:5088/health` → `{"status":"ok","version":"..."}`
 - `http://localhost:5088/openapi/v1.json` (Development 전용)
 
-Development 환경 기본값은 `Gallery:RootPath` = `./.local/gallery`, SQLite = `./.local/family-gallery.db`. `.local/`은 git 제외 대상이며 기동 시 자동 생성된다. 소스 폴더 `Data/`와 대소문자만 다른 `data/`는 Windows git이 함께 무시하므로 미사용.
+Development 환경 기본값은 `Gallery:RootPath` = `./.local/gallery`, `Thumbnail:CachePath` = `./.local/thumbnails`, SQLite = `./.local/family-gallery.db`. `.local/`은 git 제외 대상이며 기동 시 자동 생성. 소스 폴더 `Data/`와 대소문자만 다른 `data/`는 Windows git이 함께 무시하므로 미사용.
 
 ## 테스트
 
@@ -166,6 +209,7 @@ dotnet test --solution FamilyGallery.slnx
 - 테스트 클래스마다 임시 파일 SQLite를 생성하고 마이그레이션까지 적용. DB와 요청 빈도 제한 상태가 클래스 간에 섞이지 않음
 - xUnit v3의 Microsoft.Testing.Platform 지원을 사용하며, `dotnet test`도 같은 러너를 사용하도록 `global.json`에서 지정
 - 테스트 프로젝트는 `Dockerfile`의 게시 대상이 아니므로 배포 이미지에 포함되지 않음
+- 썸네일 테스트는 `PATH`의 ffmpeg 필요. 그 외 테스트는 바이트를 직접 조립해 ffmpeg 없이 실행
 
 ## 배포 (Synology NAS)
 
