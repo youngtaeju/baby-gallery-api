@@ -176,6 +176,8 @@ public sealed class MediaScannerTests
     [Theory]
     [InlineData(TrackRotation.None, 1920, 1440)]
     [InlineData(TrackRotation.Plus90, 1440, 1920)]
+    // 세로 촬영 iPhone 영상의 음수 회전각 케이스 검증.
+    [InlineData(TrackRotation.Minus90, 1440, 1920)]
     [InlineData(TrackRotation.Minus180, 1920, 1440)]
     public async Task 영상은_회전각이_세로_전환일_때만_해상도_교환(TrackRotation rotation, int expectedWidth, int expectedHeight)
     {

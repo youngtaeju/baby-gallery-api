@@ -160,7 +160,7 @@ public sealed class MediaMetadataReader
 
             // 세로로 촬영한 영상은 tkhd에 가로 해상도와 회전각이 따로 실림.
             if (track.TryGetDouble(QuickTimeTrackHeaderDirectory.TagRotation, out var rotation)
-                && (IsNear(rotation, 90) || IsNear(rotation, 270)))
+                && IsQuarterTurnRotation(rotation))
             {
                 (width, height) = (height, width);
             }
@@ -226,9 +226,10 @@ public sealed class MediaMetadataReader
             : null;
     }
 
-    // 회전각은 double로 보고됨. 부동소수 오차를 감안한 비교.
-    private static bool IsNear(double value, double target)
+    // 음수 회전각까지 처리하도록 180도 주기로 정규화해 90도 회전 여부 판정.
+    // double 값의 부동소수 오차를 고려한 허용 범위 비교.
+    private static bool IsQuarterTurnRotation(double rotation)
     {
-        return Math.Abs(value - target) < 1;
+        return Math.Abs(Math.Abs(rotation % 180) - 90) < 1;
     }
 }
