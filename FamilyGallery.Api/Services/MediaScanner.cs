@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
@@ -21,21 +20,6 @@ public sealed class MediaScanner(
     IOptions<GalleryOptions> galleryOptions,
     ILogger<MediaScanner> logger)
 {
-    private static readonly FrozenDictionary<string, MediaType> MediaTypesByExtension =
-        new Dictionary<string, MediaType>(StringComparer.OrdinalIgnoreCase)
-        {
-            [".jpg"] = MediaType.Image,
-            [".jpeg"] = MediaType.Image,
-            [".png"] = MediaType.Image,
-            [".gif"] = MediaType.Image,
-            [".webp"] = MediaType.Image,
-            [".heic"] = MediaType.Image,
-            [".heif"] = MediaType.Image,
-            [".mp4"] = MediaType.Video,
-            [".mov"] = MediaType.Video,
-            [".m4v"] = MediaType.Video
-        }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
     // 촬영일시로 성립하지 않는 값 차단. mvhd 미설정 시의 1904-01-01, 손상된 EXIF 등.
     private static readonly DateTime EarliestPlausibleCapture = new(1990, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -142,7 +126,7 @@ public sealed class MediaScanner(
                 continue;
             }
 
-            if (!MediaTypesByExtension.TryGetValue(file.Extension, out var mediaType))
+            if (!MediaTypeSniffer.TryGetTypeByExtension(file.Extension, out var mediaType))
             {
                 continue;
             }
@@ -302,7 +286,7 @@ public sealed class MediaScanner(
                     continue;
                 }
 
-                if (entry is FileInfo file && MediaTypesByExtension.ContainsKey(file.Extension))
+                if (entry is FileInfo file && MediaTypeSniffer.TryGetTypeByExtension(file.Extension, out _))
                 {
                     yield return file;
                 }
