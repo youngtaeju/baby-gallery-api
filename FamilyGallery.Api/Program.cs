@@ -82,6 +82,7 @@ public class Program
         // 생성 중복 제거와 동시 실행 제한 상태를 인스턴스에 보관. 요청마다 새로 만들면 무의미해짐.
         builder.Services.AddSingleton<ThumbnailService>();
         builder.Services.AddScoped<MediaScanner>();
+        builder.Services.AddScoped<MediaIngestService>();
 
         // 스테이징 위치는 갤러리 마운트 내부 고정. 다른 볼륨이면 편입 rename이 EXDEV로 실패.
         builder.Services.AddSingleton<ITusStore>(provider =>

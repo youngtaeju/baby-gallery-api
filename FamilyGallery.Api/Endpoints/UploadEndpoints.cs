@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
@@ -8,6 +10,7 @@ using System.Threading.Tasks;
 using FamilyGallery.Api.Data;
 using FamilyGallery.Api.Data.Entities;
 using FamilyGallery.Api.Options;
+using FamilyGallery.Api.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -43,6 +46,19 @@ public static class UploadEndpoints
 
     private const string MissingContentHashMessage = "contentHash 메타데이터가 필요합니다.";
 
+    private const string ContentMismatchMessage = "전송된 내용이 선언한 크기·해시와 다릅니다.";
+
+    private const string UnsupportedTypeMessage = "지원하지 않는 미디어 형식입니다.";
+
+    private const string IngestFailedMessage = "업로드를 원본에 반영하지 못했습니다.";
+
+    private const string SessionNotFoundMessage = "업로드 세션을 찾을 수 없습니다.";
+
+    private const string SessionIncompleteMessage = "전송이 끝나지 않은 세션입니다.";
+
+    // TusDiskStore가 발급하는 파일 id 길이. GuidFileIdProvider 기준 32자 소문자 hex.
+    private const int FileIdLength = 32;
+
     private static readonly string TooManyHashesMessage =
         $"한 번에 조회할 수 있는 해시는 {MaxLookupHashes}개까지입니다.";
 
@@ -52,6 +68,11 @@ public static class UploadEndpoints
         var group = app.MapGroup("/media/uploads").RequireAuthorization(nameof(UserRole.Editor));
 
         group.MapPost("/lookup", LookupAsync).WithName("LookupUploads");
+
+        // tus 완료 PATCH 안에서는 실패를 알릴 수 없음. tusdotnet이 응답을 204로 마무리하며
+        // 이벤트에서 설정한 상태코드를 덮어쓰고, 본문을 쓰면 응답 마무리 단계에서 예외 발생.
+        // 검증과 편입을 별도 요청으로 분리해 상태코드와 본문을 온전히 통제.
+        group.MapPost("/{fileId}/commit", CommitAsync).WithName("CommitUpload");
 
         // 라우트 패턴에 파일 id를 넣으면 기동 시 예외. tusdotnet이 직접 붙임.
         // 리터럴 세그먼트인 /lookup이 파일 id 파라미터보다 우선 매칭됨.
@@ -104,6 +125,77 @@ public static class UploadEndpoints
         }
 
         return Task.CompletedTask;
+    }
+
+    // 전송이 끝난 세션을 검증하고 원본 트리에 편입. 결과는 앱이 항목별 상태를 갱신하는 데 사용.
+    private static async Task<IResult> CommitAsync(
+        string fileId,
+        ITusStore store,
+        MediaIngestService ingest,
+        IOptions<GalleryOptions> galleryOptions,
+        IOptions<UploadOptions> uploadOptions,
+        CancellationToken cancellationToken)
+    {
+        // 저장소 경로를 조합하기 전에 형식을 확인. 클라이언트가 준 값이 경로로 흘러들지 않도록 함.
+        if (!IsFileId(fileId) || !await store.FileExistAsync(fileId, cancellationToken))
+        {
+            return Results.Problem(detail: SessionNotFoundMessage, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var uploadLength = await store.GetUploadLengthAsync(fileId, cancellationToken);
+        var uploadOffset = await store.GetUploadOffsetAsync(fileId, cancellationToken);
+
+        if (uploadLength is null || uploadOffset != uploadLength)
+        {
+            return Results.Problem(detail: SessionIncompleteMessage, statusCode: StatusCodes.Status409Conflict);
+        }
+
+        var file = await ((ITusReadableStore)store).GetFileAsync(fileId, cancellationToken);
+        var metadata = await file.GetMetadataAsync(cancellationToken);
+
+        var result = await ingest.IngestAsync(
+            Path.Combine(uploadOptions.Value.ResolveStagingPath(galleryOptions.Value.RootPath), fileId),
+            metadata[ContentHashMetadataKey].GetString(Encoding.UTF8),
+            uploadLength.Value,
+            metadata[FileNameMetadataKey].GetString(Encoding.UTF8),
+            cancellationToken);
+
+        // 편입 후 남은 사이드카와 검증 실패로 스테이징에 남은 본문 정리.
+        if (store is ITusTerminationStore termination)
+        {
+            await termination.DeleteFileAsync(fileId, cancellationToken);
+        }
+
+        return result.Status switch
+        {
+            MediaIngestStatus.Created => Results.Ok(new UploadCommitResponse(result.MediaId, false)),
+            MediaIngestStatus.Duplicate => Results.Ok(new UploadCommitResponse(result.MediaId, true)),
+            MediaIngestStatus.ContentMismatch => Results.Problem(
+                detail: ContentMismatchMessage,
+                statusCode: StatusCodes.Status422UnprocessableEntity),
+            MediaIngestStatus.UnsupportedType => Results.Problem(
+                detail: UnsupportedTypeMessage,
+                statusCode: StatusCodes.Status415UnsupportedMediaType),
+            _ => Results.Problem(detail: IngestFailedMessage, statusCode: StatusCodes.Status500InternalServerError)
+        };
+    }
+
+    private static bool IsFileId(string value)
+    {
+        if (value.Length != FileIdLength)
+        {
+            return false;
+        }
+
+        foreach (var character in value)
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string? ReadMetadata(BeforeCreateContext context, string key)
@@ -177,3 +269,6 @@ public sealed record UploadLookupRequest(IReadOnlyList<string> Hashes);
 public sealed record UploadLookupResult(string Hash, int? MediaId);
 
 public sealed record UploadLookupResponse(IReadOnlyList<UploadLookupResult> Results);
+
+// Duplicate가 true면 같은 내용이 이미 인덱스에 등록된 것. 실패가 아님.
+public sealed record UploadCommitResponse(int MediaId, bool Duplicate);

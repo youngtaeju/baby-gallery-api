@@ -33,6 +33,9 @@ public sealed class MediaMetadataReader
         (typeof(ExifSubIfdDirectory), ExifDirectoryBase.TagExifImageWidth, ExifDirectoryBase.TagExifImageHeight)
     ];
 
+    // 촬영일시로 성립하지 않는 값 차단. mvhd 미설정 시의 1904-01-01, 손상된 EXIF 등.
+    private static readonly DateTime EarliestPlausibleCapture = new(1990, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
     private readonly TimeZoneInfo _fallbackTimeZone;
 
     private readonly ILogger<MediaMetadataReader> _logger;
@@ -56,6 +59,24 @@ public sealed class MediaMetadataReader
 
             _fallbackTimeZone = TimeZoneInfo.Utc;
         }
+    }
+
+    // Indexing:TimeZone 해석 결과. EXIF 오프셋 대체와 저장 경로의 현지시각 산출에 공통 사용.
+    public TimeZoneInfo TimeZone => _fallbackTimeZone;
+
+    /// <summary>촬영일시가 없거나 값이 성립하지 않으면 대체값 사용. 인덱싱과 편입이 공유.</summary>
+    public static DateTime ResolveCapturedAt(DateTime? capturedAt, DateTime fallback)
+    {
+        if (capturedAt is null)
+        {
+            return fallback;
+        }
+
+        var value = capturedAt.Value;
+
+        return value >= EarliestPlausibleCapture && value <= DateTime.UtcNow.AddDays(1)
+            ? value
+            : fallback;
     }
 
     public MediaMetadata Read(string filePath, Data.Entities.MediaType mediaType)
