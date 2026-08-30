@@ -4,7 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using FamilyGallery.Api.Data.Entities;
-using FamilyGallery.Api.Options;
 using MetadataExtractor;
 using MetadataExtractor.Formats.Exif;
 using MetadataExtractor.Formats.Gif;
@@ -19,10 +18,10 @@ using Directory = MetadataExtractor.Directory;
 
 namespace FamilyGallery.Api.Services;
 
-// 목록에 필요한 촬영일시·해상도·재생시간만 추출. 그 외 메타데이터는 사용처 없음.
+// 목록에 필요한 촬영일시·해상도·재생시간만 추출.
 public sealed class MediaMetadataReader
 {
-    // 포맷별로 해상도를 싣는 디렉터리가 다름. 먼저 적중한 것을 채택.
+    // 포맷별로 해상도 정보가 저장된 디렉터리가 다르므로 먼저 확인된 값을 사용
     private static readonly (Type Directory, int WidthTag, int HeightTag)[] ImageDimensionSources =
     [
         (typeof(JpegDirectory), JpegDirectory.TagImageWidth, JpegDirectory.TagImageHeight),
@@ -36,33 +35,15 @@ public sealed class MediaMetadataReader
     // 촬영일시로 성립하지 않는 값 차단. mvhd 미설정 시의 1904-01-01, 손상된 EXIF 등.
     private static readonly DateTime EarliestPlausibleCapture = new(1990, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-    private readonly TimeZoneInfo _fallbackTimeZone;
+    private readonly GalleryTimeZone _timeZone;
 
     private readonly ILogger<MediaMetadataReader> _logger;
 
-    public MediaMetadataReader(IOptions<IndexingOptions> options, ILogger<MediaMetadataReader> logger)
+    public MediaMetadataReader(GalleryTimeZone timeZone, ILogger<MediaMetadataReader> logger)
     {
+        _timeZone = timeZone;
         _logger = logger;
-
-        var timeZoneId = options.Value.TimeZone;
-
-        try
-        {
-            _fallbackTimeZone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
-        }
-        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
-        {
-            // 시각 해석만 어긋날 뿐 조회 기능은 유지 가능. 기동 실패로 서비스를 내리지 않음.
-            _logger.LogError(ex,
-                "Indexing:TimeZone 값 '{TimeZone}'을 해석하지 못해 UTC로 대체합니다. 오프셋 태그가 없는 촬영일시가 어긋납니다.",
-                timeZoneId);
-
-            _fallbackTimeZone = TimeZoneInfo.Utc;
-        }
     }
-
-    // Indexing:TimeZone 해석 결과. EXIF 오프셋 대체와 저장 경로의 현지시각 산출에 공통 사용.
-    public TimeZoneInfo TimeZone => _fallbackTimeZone;
 
     /// <summary>촬영일시가 없거나 값이 성립하지 않으면 대체값 사용. 인덱싱과 편입이 공유.</summary>
     public static DateTime ResolveCapturedAt(DateTime? capturedAt, DateTime fallback)
@@ -138,11 +119,11 @@ public sealed class MediaMetadataReader
         }
 
         // ConvertTimeToUtc는 DST 전환 구간의 값에 예외를 던짐. 오프셋 직접 조회로 회피.
-        return DateTime.SpecifyKind(local - _fallbackTimeZone.GetUtcOffset(local), DateTimeKind.Utc);
+        return DateTime.SpecifyKind(local - _timeZone.Value.GetUtcOffset(local), DateTimeKind.Utc);
     }
 
-    // mvhd의 생성 시각은 QuickTime 규격상 UTC이나 촬영 시각이 아닌 파일 기록 시각.
-    // Apple 기기는 com.apple.quicktime.creationdate에 오프셋을 포함한 촬영일시를 따로 기록하므로 이를 우선 채택.
+    // mvhd의 생성 시각은 QuickTime 규격상 UTC 기준의 파일 생성 시각이며, 실제 촬영 시각과 다를 수 있음.
+    // Apple 기기는 com.apple.quicktime.creationdate에 오프셋이 포함된 촬영일시를 별도로 기록하므로 해당 값을 우선 사용.
     private DateTime? ReadQuickTimeCapturedAt(IReadOnlyList<Directory> directories)
     {
         var metadata = directories.OfType<QuickTimeMetadataHeaderDirectory>().FirstOrDefault();
@@ -160,7 +141,7 @@ public sealed class MediaMetadataReader
             : null;
     }
 
-    // 오프셋을 포함한 값은 Local로 파싱됨. SpecifyKind로 덮으면 오프셋만큼 어긋남.
+    // 오프셋을 포함한 값은 Local로 파싱.
     private DateTime ToUtc(DateTime value)
     {
         return value.Kind switch
@@ -168,12 +149,12 @@ public sealed class MediaMetadataReader
             DateTimeKind.Utc => value,
             DateTimeKind.Local => value.ToUniversalTime(),
 
-            // ConvertTimeToUtc는 DST 전환 구간의 값에 예외를 던짐. 오프셋 직접 조회로 회피.
-            _ => DateTime.SpecifyKind(value - _fallbackTimeZone.GetUtcOffset(value), DateTimeKind.Utc)
+            // ConvertTimeToUtc의 DST 전환 구간 예외 방지를 위해 오프셋을 직접 조회.
+            _ => DateTime.SpecifyKind(value - _timeZone.Value.GetUtcOffset(value), DateTimeKind.Utc)
         };
     }
 
-    // MetadataExtractor가 timescale을 반영해 TimeSpan으로 정규화. 수치 조회 API로는 얻을 수 없음.
+    // MetadataExtractor가 timescale을 반영해 TimeSpan으로 정규화.
     private static int? ReadDurationMs(IReadOnlyList<Directory> directories)
     {
         var header = directories.OfType<QuickTimeMovieHeaderDirectory>().FirstOrDefault();

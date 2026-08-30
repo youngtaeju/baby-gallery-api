@@ -6,10 +6,11 @@ public sealed class UploadOptions
 {
     public const string SectionName = "Upload";
 
-    // 갤러리 마운트 내부 고정. 다른 볼륨이면 편입 시 rename이 EXDEV로 실패.
-    // '.' 시작이라 인덱싱 스캔 순회에서 제외됨.
     [Required]
     public string StagingDirectoryName { get; init; } = ".uploads";
+
+    [Required]
+    public string TrashDirectoryName { get; init; } = ".trash";
 
     // 가족 단위 촬영물 기준 상한.
     [Range(1024, 8L * 1024 * 1024 * 1024)]
@@ -23,5 +24,10 @@ public sealed class UploadOptions
     public string ResolveStagingPath(string galleryRootPath)
     {
         return System.IO.Path.Combine(System.IO.Path.GetFullPath(galleryRootPath), StagingDirectoryName);
+    }
+
+    public string ResolveTrashPath(string galleryRootPath)
+    {
+        return System.IO.Path.Combine(System.IO.Path.GetFullPath(galleryRootPath), TrashDirectoryName);
     }
 }

@@ -20,6 +20,7 @@ namespace FamilyGallery.Api.Services;
 public sealed class MediaIngestService(
     AppDbContext db,
     MediaMetadataReader metadataReader,
+    GalleryTimeZone timeZone,
     IOptions<GalleryOptions> galleryOptions,
     ILogger<MediaIngestService> logger)
 {
@@ -181,7 +182,7 @@ public sealed class MediaIngestService(
         return MediaIngestResult.Duplicate(existing.Id);
     }
 
-    // 연·월 디렉터리와 파일명 시각 모두 촬영일시 기준이며 Indexing:TimeZone의 현지시각으로 표기.
+    // 연·월 디렉터리와 파일명 시각 모두 촬영일시 기준이며 구성된 표준시의 현지시각으로 표기.
     // CapturedAt 저장값은 UTC지만, DSM·SMB 열람 시 앱에 보이는 날짜와 어긋나지 않는 쪽을 택함.
     private bool TryResolveTargetPath(
         string root,
@@ -190,7 +191,7 @@ public sealed class MediaIngestService(
         string extension,
         out string targetPath)
     {
-        var local = TimeZoneInfo.ConvertTimeFromUtc(capturedAt, metadataReader.TimeZone);
+        var local = timeZone.ToLocal(capturedAt);
 
         var directory = Path.Combine(
             root,

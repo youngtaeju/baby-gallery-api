@@ -37,6 +37,9 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     // 스테이징이 갤러리 마운트 내부인지 파일로 직접 확인하기 위해 노출.
     public string StagingPath { get; }
 
+    // 삭제분이 실제로 옮겨졌는지 파일로 직접 확인하기 위해 노출.
+    public string TrashPath { get; }
+
     private readonly string? _timeZone;
 
     private readonly long? _maxUploadSizeBytes;
@@ -59,6 +62,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         Directory.CreateDirectory(GalleryPath);
         ThumbnailPath = Path.Combine(_rootPath, "thumbnails");
         StagingPath = Path.Combine(GalleryPath, ".uploads");
+        TrashPath = Path.Combine(GalleryPath, ".trash");
         _databasePath = Path.Combine(_rootPath, "test.db");
 
         // Services 접근 시 호스트가 생성되며 ConfigureWebHost가 적용됨.
@@ -174,6 +178,28 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         await db.SaveChangesAsync();
 
         return item.Id;
+    }
+
+    // 스캔으로 등록된 항목의 Id 조회. 상대 경로는 API 응답에 없으므로 DB에서 직접 확인.
+    public async Task<int> FindMediaIdAsync(string relativePath)
+    {
+        using var scope = Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        return await db.MediaItems
+            .AsNoTracking()
+            .Where(m => m.RelativePath == relativePath)
+            .Select(m => m.Id)
+            .SingleAsync();
+    }
+
+    // 감사 로그는 API로 노출하지 않으므로 DB에서 직접 확인.
+    public async Task<IReadOnlyList<MediaDeletion>> GetDeletionsAsync()
+    {
+        using var scope = Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        return await db.MediaDeletions.AsNoTracking().ToListAsync();
     }
 
     // 인덱싱 동작 검증은 백그라운드 주기가 아닌 명시적 1회 실행으로 수행.

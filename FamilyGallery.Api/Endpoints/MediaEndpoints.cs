@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Claims;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,6 +31,8 @@ public static class MediaEndpoints
     private const string InvalidCursorMessage = "cursor 값이 올바르지 않습니다.";
 
     private const string MediaNotFoundMessage = "미디어를 찾을 수 없습니다.";
+
+    private const string DeleteFailedMessage = "삭제를 처리하지 못했습니다.";
 
     private const string ThumbnailUnavailableMessage = "썸네일을 생성할 수 없습니다.";
 
@@ -65,6 +68,11 @@ public static class MediaEndpoints
         // HEAD는 영상 플레이어가 재생 전에 길이와 Range 지원 여부를 조회하는 경우 대비.
         group.MapMethods("/{id:int}/original", ["GET", "HEAD"], GetOriginalAsync).WithName("GetMediaOriginal");
         group.MapGet("/{id:int}/thumbnail", GetThumbnailAsync).WithName("GetMediaThumbnail");
+
+        // 쓰기 경로. 실삭제가 아니라 휴지통 이동이며 인덱스에서만 즉시 사라짐.
+        group.MapDelete("/{id:int}", DeleteAsync)
+            .WithName("DeleteMedia")
+            .RequireAuthorization(nameof(UserRole.Editor));
 
         return app;
     }
@@ -128,7 +136,7 @@ public static class MediaEndpoints
 
         // 스캔 이후 삭제된 파일은 다음 스캔까지 인덱스에 남음. 인덱스 유무만으로 판단하지 않음.
         if (item is null
-            || !TryResolveGalleryPath(galleryOptions.Value.RootPath, item.RelativePath, out var fullPath)
+            || !galleryOptions.Value.TryResolveMediaPath(item.RelativePath, out var fullPath)
             || !File.Exists(fullPath))
         {
             return Results.Problem(detail: MediaNotFoundMessage, statusCode: StatusCodes.Status404NotFound);
@@ -155,7 +163,7 @@ public static class MediaEndpoints
         var item = await db.MediaItems.AsNoTracking().SingleOrDefaultAsync(m => m.Id == id, cancellationToken);
 
         if (item is null
-            || !TryResolveGalleryPath(galleryOptions.Value.RootPath, item.RelativePath, out var sourcePath)
+            || !galleryOptions.Value.TryResolveMediaPath(item.RelativePath, out var sourcePath)
             || !File.Exists(sourcePath))
         {
             return Results.Problem(detail: MediaNotFoundMessage, statusCode: StatusCodes.Status404NotFound);
@@ -178,22 +186,38 @@ public static class MediaEndpoints
             entityTag: new EntityTagHeaderValue($"\"{item.ContentHash}-{ThumbnailService.SpecToken}\""));
     }
 
-    // RelativePath는 스캐너가 기록한 값이지만 인덱스 오염에 대비해 원본 트리 하위인지 확인.
-    private static bool TryResolveGalleryPath(string rootPath, string relativePath, out string fullPath)
-    {
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-
-        fullPath = Path.GetFullPath(Path.Combine(root, relativePath));
-
-        return fullPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
-    }
-
     // 화이트리스트 밖 확장자는 인덱싱되지 않으나, 응답 헤더를 비워 두지 않도록 기본값 지정.
     private static string ResolveContentType(string relativePath)
     {
         return ContentTypesByExtension.TryGetValue(Path.GetExtension(relativePath), out var contentType)
             ? contentType
             : "application/octet-stream";
+    }
+
+    private static async Task<IResult> DeleteAsync(
+        int id,
+        ClaimsPrincipal user,
+        AppDbContext db,
+        MediaTrashService trash,
+        CancellationToken cancellationToken)
+    {
+        var item = await db.MediaItems.SingleOrDefaultAsync(m => m.Id == id, cancellationToken);
+
+        if (item is null)
+        {
+            return Results.Problem(detail: MediaNotFoundMessage, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var userId = int.Parse(
+            user.FindFirstValue(TokenService.UserIdClaimType)!,
+            NumberStyles.None,
+            CultureInfo.InvariantCulture);
+
+        var moved = await trash.MoveToTrashAsync(item, userId, user.Identity!.Name!, cancellationToken);
+
+        return moved
+            ? Results.NoContent()
+            : Results.Problem(detail: DeleteFailedMessage, statusCode: StatusCodes.Status500InternalServerError);
     }
 
     // 클라이언트가 내부 구조에 의존하지 않도록 불투명 문자열로 전달.

@@ -12,6 +12,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
     public DbSet<MediaItem> MediaItems => Set<MediaItem>();
 
+    public DbSet<MediaDeletion> MediaDeletions => Set<MediaDeletion>();
+
     // 엔티티 추가 시 개별 지정 없이 모든 DateTime 속성에 적용.
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -60,6 +62,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.ContentHash).HasMaxLength(64);
 
             entity.Property(m => m.MediaType).HasConversion<string>().HasMaxLength(16);
+        });
+
+        modelBuilder.Entity<MediaDeletion>(entity =>
+        {
+            // 보존 기간 정리가 디렉터리 순회 없이 미처리분만 조회.
+            entity.HasIndex(d => d.PurgedAt);
+
+            // 같은 내용의 삭제·재업로드 이력 추적용.
+            entity.HasIndex(d => d.ContentHash);
+
+            entity.Property(d => d.ContentHash).HasMaxLength(64);
+            entity.Property(d => d.OriginalRelativePath).HasMaxLength(1024);
+            entity.Property(d => d.TrashRelativePath).HasMaxLength(1024);
+            entity.Property(d => d.OriginalFileName).HasMaxLength(256);
+            entity.Property(d => d.DeletedByUsername).HasMaxLength(64);
         });
     }
 }
