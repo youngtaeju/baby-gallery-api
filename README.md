@@ -190,7 +190,7 @@ docker compose exec -it api dotnet FamilyGallery.Api.dll user add {계정명} --
 - 썸네일 `ETag`에 규격 토큰 포함
 - 크기·품질 정책 변경 시 캐시 자동 무효화
 
-> HEIC·HEIF 썸네일 미지원  
+> HEIC·HEIF 썸네일 미지원
 > 배포 이미지의 ffmpeg 6.1.1 기준 HEIC demuxing 미지원. 인덱싱, 목록 조회, 원본 조회는 정상 지원하며 썸네일 요청만 `404` 반환.
 
 ## 인덱싱
@@ -274,6 +274,9 @@ lookup
 - 스테이징 디렉터리는 갤러리 마운트 내부 구성
 - 다른 볼륨 사용 시 원자적 이동 실패 가능성 존재
 - 미완료 세션은 `Upload:SessionExpirationHours` 경과 후 정리
+- 허용 tus 확장은 `creation`, `termination`, `expiration` 세 가지
+  - `creation-defer-length`는 `Upload-Length` 없이 세션 생성이 가능해 업로드 크기 상한 검증을 우회할 수 있으므로 미지원
+  - `concatenation`은 부분 업로드 결합을 허용하지만 편입 로직이 단일 파일을 전제로 하므로 미지원
 
 ### commit
 

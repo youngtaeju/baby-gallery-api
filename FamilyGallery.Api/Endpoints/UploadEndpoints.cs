@@ -90,6 +90,12 @@ public static class UploadEndpoints
         {
             Store = context.RequestServices.GetRequiredService<ITusStore>(),
 
+            // 실제 사용하는 확장만 허용.
+            AllowedExtensions = new TusExtensions(
+                TusExtensions.Creation,
+                TusExtensions.Termination,
+                TusExtensions.Expiration),
+
             // MaxAllowedUploadSizeInBytes는 int?. 2GB 초과 상한을 담지 못함.
             MaxAllowedUploadSizeInBytesLong = options.MaxUploadSizeBytes,
 

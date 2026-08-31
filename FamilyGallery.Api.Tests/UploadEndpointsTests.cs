@@ -277,6 +277,84 @@ public sealed class UploadEndpointsTests
         return payload.Results;
     }
 
+    [Fact]
+    public async Task 업로드세션_취소하면_스테이징이_비워짐()
+    {
+        using var factory = new ApiFactory();
+        var client = await CreateClientAsync(factory, "session-cancel", UserRole.Editor);
+
+        var created = await client.SendAsync(CreateSessionRequest(1024, KnownHash, "IMG_0001.JPG"), TestToken);
+
+        created.EnsureSuccessStatusCode();
+
+        var cancel = new HttpRequestMessage(HttpMethod.Delete, created.Headers.Location!.OriginalString);
+
+        cancel.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0");
+
+        var response = await client.SendAsync(cancel, TestToken);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Empty(Directory.GetFiles(factory.StagingPath));
+    }
+
+    [Fact]
+    public async Task 업로드세션_길이_선언을_미루면_거부()
+    {
+        using var factory = new ApiFactory();
+        var client = await CreateClientAsync(factory, "session-defer", UserRole.Editor);
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/media/uploads");
+
+        request.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0");
+
+        // Upload-Length 없이 생성하면 서버는 세션 생성 시 업로드 크기를 검증할 수 없음.
+        request.Headers.TryAddWithoutValidation("Upload-Defer-Length", "1");
+        request.Headers.TryAddWithoutValidation(
+            "Upload-Metadata",
+            $"filename {Convert.ToBase64String(Encoding.UTF8.GetBytes("IMG_0001.JPG"))}," +
+            $"contentHash {Convert.ToBase64String(Encoding.UTF8.GetBytes(KnownHash))}");
+
+        var response = await client.SendAsync(request, TestToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task 업로드세션_이어붙이기_요청은_거부()
+    {
+        using var factory = new ApiFactory();
+        var client = await CreateClientAsync(factory, "session-concat", UserRole.Editor);
+
+        var request = CreateSessionRequest(1024, KnownHash, "IMG_0001.JPG");
+
+        // 부분 파일 조립은 편입이 전제하는 단일 파일 모델과 맞지 않음.
+        request.Headers.TryAddWithoutValidation("Upload-Concat", "partial");
+
+        var response = await client.SendAsync(request, TestToken);
+
+        // 미허용 확장은 tusdotnet이 처리하지 않아 404로 응답.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Empty(Directory.GetFiles(factory.StagingPath));
+    }
+
+    [Fact]
+    public async Task 지원_확장은_실제_사용하는_것만_노출()
+    {
+        using var factory = new ApiFactory();
+        var client = await CreateClientAsync(factory, "session-options", UserRole.Editor);
+
+        var request = new HttpRequestMessage(HttpMethod.Options, "/media/uploads");
+
+        request.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0");
+
+        var response = await client.SendAsync(request, TestToken);
+        var extensions = response.Headers.GetValues("Tus-Extension").Single().Split(',');
+
+        Assert.Equal(
+            ["creation", "expiration", "termination"],
+            extensions.Select(e => e.Trim()).Order(StringComparer.Ordinal));
+    }
+
     // tus creation 요청. 메타데이터는 "key base64value" 목록.
     private static HttpRequestMessage CreateSessionRequest(long uploadLength, string? contentHash, string? fileName)
     {
