@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
@@ -21,24 +20,6 @@ public sealed class MediaScanner(
     IOptions<GalleryOptions> galleryOptions,
     ILogger<MediaScanner> logger)
 {
-    private static readonly FrozenDictionary<string, MediaType> MediaTypesByExtension =
-        new Dictionary<string, MediaType>(StringComparer.OrdinalIgnoreCase)
-        {
-            [".jpg"] = MediaType.Image,
-            [".jpeg"] = MediaType.Image,
-            [".png"] = MediaType.Image,
-            [".gif"] = MediaType.Image,
-            [".webp"] = MediaType.Image,
-            [".heic"] = MediaType.Image,
-            [".heif"] = MediaType.Image,
-            [".mp4"] = MediaType.Video,
-            [".mov"] = MediaType.Video,
-            [".m4v"] = MediaType.Video
-        }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
-
-    // 촬영일시로 성립하지 않는 값 차단. mvhd 미설정 시의 1904-01-01, 손상된 EXIF 등.
-    private static readonly DateTime EarliestPlausibleCapture = new(1990, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-
     // 대량 투입 중 중단되어도 진행분이 남도록 중간 저장.
     private const int SaveBatchSize = 200;
 
@@ -142,7 +123,7 @@ public sealed class MediaScanner(
                 continue;
             }
 
-            if (!MediaTypesByExtension.TryGetValue(file.Extension, out var mediaType))
+            if (!MediaTypeSniffer.TryGetTypeByExtension(file.Extension, out var mediaType))
             {
                 continue;
             }
@@ -235,22 +216,7 @@ public sealed class MediaScanner(
         item.Width = metadata.Width;
         item.Height = metadata.Height;
         item.DurationMs = metadata.DurationMs;
-        item.CapturedAt = ResolveCapturedAt(metadata.CapturedAt, modifiedAt);
-    }
-
-    // 메타데이터에 촬영일시가 없거나 값이 성립하지 않으면 mtime으로 대체.
-    private static DateTime ResolveCapturedAt(DateTime? capturedAt, DateTime modifiedAt)
-    {
-        if (capturedAt is null)
-        {
-            return modifiedAt;
-        }
-
-        var value = capturedAt.Value;
-
-        return value >= EarliestPlausibleCapture && value <= DateTime.UtcNow.AddDays(1)
-            ? value
-            : modifiedAt;
+        item.CapturedAt = MediaMetadataReader.ResolveCapturedAt(metadata.CapturedAt, modifiedAt);
     }
 
     private static async Task<string> ComputeContentHashAsync(string filePath, CancellationToken cancellationToken)
@@ -302,7 +268,7 @@ public sealed class MediaScanner(
                     continue;
                 }
 
-                if (entry is FileInfo file && MediaTypesByExtension.ContainsKey(file.Extension))
+                if (entry is FileInfo file && MediaTypeSniffer.TryGetTypeByExtension(file.Extension, out _))
                 {
                     yield return file;
                 }

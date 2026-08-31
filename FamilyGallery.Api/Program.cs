@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading.RateLimiting;
 using FamilyGallery.Api.Cli;
 using FamilyGallery.Api.Data;
+using FamilyGallery.Api.Data.Entities;
 using FamilyGallery.Api.Endpoints;
 using FamilyGallery.Api.Options;
 using FamilyGallery.Api.Services;
@@ -22,6 +23,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using tusdotnet.Interfaces;
+using tusdotnet.Stores;
 
 namespace FamilyGallery.Api;
 
@@ -65,15 +68,39 @@ public class Program
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
+        builder.Services.AddOptions<UploadOptions>()
+            .BindConfiguration(UploadOptions.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
         builder.Services.AddDbContext<AppDbContext>(options =>
             options.UseSqlite(builder.Configuration.GetConnectionString("Default")));
 
         builder.Services.AddSingleton<TokenService>();
+        builder.Services.AddSingleton<GalleryTimeZone>();
         builder.Services.AddSingleton<MediaMetadataReader>();
 
         // 생성 중복 제거와 동시 실행 제한 상태를 인스턴스에 보관. 요청마다 새로 만들면 무의미해짐.
         builder.Services.AddSingleton<ThumbnailService>();
         builder.Services.AddScoped<MediaScanner>();
+        builder.Services.AddScoped<MediaIngestService>();
+        builder.Services.AddScoped<MediaTrashService>();
+
+        // 스테이징 위치는 갤러리 마운트 내부 고정. 다른 볼륨이면 편입 rename이 EXDEV로 실패.
+        builder.Services.AddSingleton<ITusStore>(provider =>
+        {
+            var gallery = provider.GetRequiredService<IOptions<GalleryOptions>>().Value;
+            var upload = provider.GetRequiredService<IOptions<UploadOptions>>().Value;
+
+            var staging = Path.Combine(
+                Path.GetFullPath(gallery.RootPath),
+                upload.StagingDirectoryName);
+
+            // TusDiskStore는 상위 디렉터리를 만들지 않음. 최초 세션 생성 실패 방지.
+            Directory.CreateDirectory(staging);
+
+            return new TusDiskStore(staging);
+        });
 
         // TLS 종료는 Cloudflare Tunnel 담당. 컨테이너는 평문 HTTP만 수신하므로 HTTPS 리디렉션 없음.
         builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -117,6 +144,9 @@ public class Program
             options.FallbackPolicy = new AuthorizationPolicyBuilder()
                 .RequireAuthenticatedUser()
                 .Build();
+
+            // 쓰기 경로 전용. 조회는 권한과 무관하게 로그인 계정 전원 허용.
+            options.AddPolicy(nameof(UserRole.Editor), policy => policy.RequireRole(nameof(UserRole.Editor)));
         });
 
         builder.Services.AddRateLimiter(options =>
@@ -179,6 +209,7 @@ public class Program
         app.MapHealthEndpoints();
         app.MapAuthEndpoints();
         app.MapMediaEndpoints();
+        app.MapUploadEndpoints();
 
         app.Run();
 

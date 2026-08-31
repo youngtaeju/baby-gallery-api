@@ -1,137 +1,370 @@
 # family-gallery-api
 
-가정용 시놀로지 NAS의 이미지·영상을 가족 구성원에게만 제공하는 API.
+가정용 Synology NAS의 이미지·영상을 가족 구성원에게 제공하기 위한 전용 API.
 
-- 조회는 로그인한 사용자 전원, 업로드·삭제는 `editor` 권한 계정만
-- 원본 수정 경로 없음. 쓰기는 신규 추가와 삭제뿐이며 삭제는 휴지통 이동으로 처리
-- 외부 노출은 Cloudflare Tunnel 단일 경로
-- 클라이언트는 Flutter 앱(`family-gallery-app`) 단독
+- 로그인 사용자 전체 조회 허용
+- `Editor` 권한 사용자만 업로드·삭제 허용
+- 원본 수정 미지원, 신규 추가 및 휴지통 기반 삭제만 허용
+- Cloudflare Tunnel 단일 경로를 통한 외부 노출
+- Flutter 클라이언트 `family-gallery-app` 전용
 
 ## 요구 사항
 
 - .NET SDK 10.0
-- ffmpeg (썸네일 생성. 로컬 실행 시 `PATH`에 필요하며 배포 이미지에는 포함)
-- (배포) Docker / Docker Compose
+- ffmpeg
+  - 썸네일 생성 용도
+  - 로컬 실행 시 `PATH` 등록 필요
+  - 배포 이미지 기본 포함
+- Docker / Docker Compose
+  - NAS 배포 시 필요
 
 ## 프로젝트 구조
 
-```
+```text
 .config/
   dotnet-tools.json   로컬 도구 매니페스트 (dotnet-ef)
 global.json           dotnet test 러너 지정
 FamilyGallery.slnx
+
 FamilyGallery.Api/
-  Program.cs          서비스 등록 / 파이프라인 / DB 초기화
-  Options/            Jwt, Gallery, Indexing, Thumbnail 설정 바인딩
-  Data/               AppDbContext, Entities, 값 변환기
+  Program.cs          서비스 등록, HTTP 파이프라인, DB 초기화
+  Options/            Jwt, Gallery, Indexing, Thumbnail, Upload 설정
+  Data/               AppDbContext, 엔티티, 값 변환기
   Migrations/         EF Core 마이그레이션
-  Endpoints/          엔드포인트 매핑 확장 메서드
-  Services/           토큰 발급, 미디어 인덱싱, 썸네일 생성
+  Endpoints/          엔드포인트 매핑
+  Services/           인증, 인덱싱, 타입 판별, 업로드 편입, 휴지통, 썸네일
   Cli/                계정 관리 명령
+
 FamilyGallery.Api.Tests/
-  ApiFactory.cs       테스트용 호스트 / 임시 DB
-  MediaFixtures.cs    JPEG·MP4 바이트 조립
-  FfmpegFixtures.cs   디코딩 가능한 미디어 생성
+  ApiFactory.cs       테스트 호스트 및 임시 DB
+  MediaFixtures.cs    JPEG·MP4 테스트 데이터
+  FfmpegFixtures.cs   디코딩 가능한 테스트 미디어
+  TestUploads.cs      tus 업로드 테스트 헬퍼
   *Tests.cs           통합 테스트
+
 Dockerfile
-docker-compose.yml    NAS 배포용
+docker-compose.yml    Synology NAS 배포 구성
 ```
 
 ## 인증 / 인가
 
-- JWT Bearer 스킴. issuer / audience / 만료 / 서명 키 전부 검증
-- 인가 fallback policy 적용. 전 엔드포인트 인증 필수가 기본값
-- 익명 허용은 `/health`, 개발용 OpenAPI 문서뿐
-- 권한은 `User.Role`의 `Viewer` / `Editor` 2종. 조회 범위는 권한과 무관하게 동일하고, 업로드·삭제만 `Editor`로 제한
-- 클레임은 `sub` / `name` / `role` / `jti`. 인바운드 클레임 매핑 비활성화로 발급·검증 이름 일치
+- JWT Bearer 인증
+- issuer, audience, 만료, 서명 키 검증
+- fallback policy 기반 전 엔드포인트 인증 적용
+- 익명 허용 대상
+  - `GET /health`
+  - Development 환경 OpenAPI 문서
+- 사용자 권한
+  - `Viewer`: 조회
+  - `Editor`: 조회, 업로드, 삭제
+- JWT 클레임
+  - `sub`
+  - `name`
+  - `role`
+  - `jti`
+- 인바운드 클레임 매핑 비활성화
+
+### 인증 API
 
 | 엔드포인트 | 인증 | 설명 |
 | --- | --- | --- |
-| `POST /auth/login` | 익명 | 자격 증명 검증 후 토큰 쌍 + 사용자 정보 반환 |
+| `POST /auth/login` | 익명 | 자격 증명 검증 및 토큰 쌍 발급 |
 | `POST /auth/refresh` | 익명 | refresh token 회전 발급 |
-| `POST /auth/logout` | 필요 | 제시한 refresh token 폐기 |
-| `GET /auth/me` | 필요 | 현재 사용자 정보 (DB 조회) |
+| `POST /auth/logout` | 필요 | refresh token 폐기 |
+| `GET /auth/me` | 필요 | 현재 사용자 정보 조회 |
 
-- `POST /auth/login`과 `POST /auth/refresh`는 요청 빈도 제한. 초과 시 `429`와 `Retry-After` 헤더 반환
-- refresh token은 원문 미저장. SHA-256 해시로 대조하고 사용 시 회전 발급
-- 폐기된 refresh token이 다시 제시되면 탈취로 간주해 해당 사용자의 유효한 세션 전부 차단
-- 로그인 실패는 계정 존재 여부와 무관하게 동일 응답. 계정 부재 시에도 해시 검증을 수행해 응답 시간 차이 제거
+### 토큰 정책
 
-권한 변경 반영 시점에 주의. access token은 자체 완결적이라 매 요청마다 DB를 조회하지 않음.
+- refresh token 원문 미저장
+- SHA-256 해시 기반 검증
+- refresh 시 기존 토큰 폐기 후 신규 토큰 발급
+- 폐기된 refresh token 재사용 시 해당 사용자의 전체 유효 세션 폐기
+- 로그인 실패 시 계정 존재 여부와 무관한 동일 응답 반환
+- 계정 미존재 시에도 해시 검증 수행을 통한 응답 시간 차이 완화
 
-- `user add`로 만든 계정은 즉시 로그인 가능
-- `user set-role` / `user set-password`는 **이미 발급된 access token에 반영되지 않음**. 최대 `Jwt:AccessTokenMinutes`(기본 30분) 경과 또는 refresh 시점에 반영
-- `GET /auth/me`는 DB를 조회하므로 즉시 반영. 인가 판정은 클레임 기준이라 지연
+### 권한 변경 반영
+
+access token은 자체 완결형 토큰으로 매 요청마다 DB 미조회.
+
+- 신규 계정 생성 즉시 로그인 가능
+- `user set-role` 결과는 기존 access token에 미반영
+- `user set-password` 결과도 기존 access token에 미반영
+- 최대 `Jwt:AccessTokenMinutes` 경과 또는 refresh 이후 변경 사항 반영
+- `GET /auth/me`는 DB 직접 조회로 즉시 반영
+- 실제 인가 판정은 JWT 클레임 기준
 
 ### 요청 빈도 제한
 
-- 인증 없이 반복 호출 가능한 `POST /auth/login`, `POST /auth/refresh`만 대상. 나머지는 토큰 자체가 관문
-- IP당 1분에 20회. 가족 단위 사용량 기준이며 정상적인 재시도는 허용하고 무차별 대입만 차단
-- 집계 기준 IP는 `CF-Connecting-IP` 헤더 우선, 없으면 연결 원격 주소
-  - `X-Forwarded-For`는 `KnownProxies`를 비워둔 구성상 클라이언트가 위조할 수 있어 사용하지 않음
-  - `CF-Connecting-IP`는 Cloudflare가 항상 덮어쓰므로 Tunnel 단일 경로 전제에서 신뢰 가능
+적용 대상:
+
+- `POST /auth/login`
+- `POST /auth/refresh`
+
+정책:
+
+- IP당 1분 20회
+- 초과 시 `429 Too Many Requests`
+- `Retry-After` 헤더 반환
+- 집계 IP는 `CF-Connecting-IP` 우선
+- 헤더 부재 시 연결 원격 주소 사용
+- `X-Forwarded-For` 미사용
+  - `KnownProxies` 미지정 구성에서 클라이언트 위조 가능성 존재
+- `CF-Connecting-IP` 신뢰
+  - Cloudflare Tunnel 단일 진입 경로 전제
+  - Cloudflare의 헤더 덮어쓰기 보장 전제
 
 ## 사용자 관리
 
-계정 생성·권한 변경은 CLI로만 수행. 관리용 HTTP 엔드포인트 미제공.
+계정 생성 및 변경은 CLI 전용. 관리용 HTTP API 미제공.
 
-```
+```text
 user list
 user add <username> --display-name <표시 이름> [--role viewer|editor]
 user set-role <username> <viewer|editor>
 user set-password <username>
 ```
 
-- `--role` 기본값은 `viewer`
-- 비밀번호는 인자로 받지 않고 실행 후 표준 입력으로 수신. 셸 히스토리와 프로세스 목록 노출 방지
-- 비밀번호는 8자 이상. `set-password` 실행 시 해당 사용자의 유효한 refresh token 전부 폐기
-- 성공은 종료 코드 `0`, 실패는 `1`
+정책:
 
-로컬:
+- `--role` 기본값 `viewer`
+- 비밀번호 최소 8자
+- 비밀번호 인자 전달 미지원
+- 실행 후 표준 입력을 통한 비밀번호 입력
+- 셸 히스토리 및 프로세스 목록 노출 방지
+- `set-password` 실행 시 해당 사용자의 전체 refresh token 폐기
+- 성공 종료 코드 `0`
+- 실패 종료 코드 `1`
+
+로컬 실행:
 
 ```powershell
 dotnet run --project FamilyGallery.Api -- user add {계정명} --display-name "{표시 이름}" --role editor
 ```
 
-컨테이너 (비밀번호 입력을 위해 `-it` 필요):
+컨테이너 실행:
 
 ```bash
 docker compose exec -it api dotnet FamilyGallery.Api.dll user add {계정명} --display-name "{표시 이름}" --role editor
 ```
 
+비밀번호 입력을 위한 `-it` 옵션 필요.
+
 ## 미디어
 
-전 엔드포인트 인증 필요. 조회 범위는 권한과 무관하게 동일.
+### API
+
+| 엔드포인트 | 권한 | 설명 |
+| --- | --- | --- |
+| `GET /media` | 인증 | 촬영일시 내림차순 목록 조회, 커서 페이징 |
+| `GET /media/{id}` | 인증 | 단건 조회 |
+| `GET /media/{id}/original` | 인증 | 원본 바이너리 조회 |
+| `HEAD /media/{id}/original` | 인증 | 원본 메타데이터 조회 |
+| `GET /media/{id}/thumbnail` | 인증 | 512px WebP 썸네일 조회 |
+| `DELETE /media/{id}` | `Editor` | 휴지통 기반 삭제 |
+
+### 조회 정책
+
+- NAS 내부 경로 미노출
+- 내용 해시 미노출
+- 모든 미디어 참조는 `id` 기준
+- 목록 기본 `limit` 50
+- 목록 최대 `limit` 200
+- `nextCursor` 기반 다음 페이지 조회
+- `nextCursor = null`이면 마지막 페이지
+- 원본 `Range` 요청 지원
+- 정상 부분 응답 `206`
+- 유효하지 않은 범위 요청 `416`
+- 원본 `ETag`는 SHA-256 기반
+- 원본 변경 감지 시 스캔을 통한 `ETag` 갱신
+- 인덱스 존재 여부와 무관하게 실제 파일 부재 시 `404`
+- 서버 측 실시간 트랜스코딩 미지원
+
+### 썸네일
+
+- 요청 시 생성 후 디스크 캐시
+- 긴 변 512px WebP
+- 생성 실패 시 `404`
+- 실패 결과 미캐시
+- 다음 요청 시 재생성 시도
+- 원본 및 썸네일 공통 `Cache-Control: private, max-age=604800`
+- 썸네일 `ETag`에 규격 토큰 포함
+- 크기·품질 정책 변경 시 캐시 자동 무효화
+
+> HEIC·HEIF 썸네일 미지원
+> 배포 이미지의 ffmpeg 6.1.1 기준 HEIC demuxing 미지원. 인덱싱, 목록 조회, 원본 조회는 정상 지원하며 썸네일 요청만 `404` 반환.
+
+## 인덱싱
+
+미디어 목록은 파일시스템 직접 순회가 아닌 DB 인덱스 기반 제공. DSM·SMB를 통한 직접 파일 추가는 백그라운드 스캔으로 반영.
+
+정책:
+
+- 애플리케이션 기동 직후 1회 실행
+- 이후 `Indexing:IntervalMinutes` 주기 실행
+- `.` 시작 디렉터리 제외
+- 심볼릭 링크 제외
+- 동일 내용 파일 중복 인덱싱 방지
+- 이미지 EXIF 및 영상 QuickTime 메타데이터에서 촬영일시 추출
+- 촬영일시 부재 시 파일 mtime 사용
+- 오프셋 없는 촬영일시에 `Indexing:TimeZone` 적용
+- 회전 정보를 반영한 표시 방향 기준 해상도 저장
+
+지원 확장자:
+
+```text
+.jpg
+.jpeg
+.png
+.gif
+.webp
+.heic
+.heif
+.mp4
+.mov
+.m4v
+```
+
+각 스캔 주기에서 다음 작업을 직렬 실행:
+
+1. 미디어 인덱싱
+2. 휴지통 보존 기간 정리
+3. 만료 업로드 세션 정리
+
+개별 작업 실패가 후속 작업 및 다음 스캔 주기에 영향을 주지 않는 구조.
+
+## 업로드
+
+tus 1.0 기반 resumable upload. 전체 경로 `Editor` 권한 필요.
+
+### API
 
 | 엔드포인트 | 설명 |
 | --- | --- |
-| `GET /media` | 촬영일시 내림차순 목록. 커서 페이징 |
-| `GET /media/{id}` | 단건 조회 |
-| `GET`·`HEAD /media/{id}/original` | 원본 바이너리. `Range` 요청 지원 |
-| `GET /media/{id}/thumbnail` | 썸네일. 긴 변 512px WebP |
+| `POST /media/uploads/lookup` | 해시 배치 조회 및 중복 판정 |
+| `POST /media/uploads` | 업로드 세션 생성 |
+| `PATCH /media/uploads/{fileId}` | 청크 전송 |
+| `HEAD /media/uploads/{fileId}` | 현재 업로드 오프셋 조회 |
+| `DELETE /media/uploads/{fileId}` | 업로드 세션 취소 |
+| `POST /media/uploads/{fileId}/commit` | 검증 후 원본 트리 편입 |
 
-- 응답에 NAS 경로와 내용 해시 미노출. 미디어 참조는 `id` 기반이며 원본·썸네일 URL도 `id`에서 도출
-- 목록은 `limit` 기본 `50`, 최대 `200`. `nextCursor`를 그대로 다음 요청에 전달하고 `null`이면 마지막 페이지
-- 원본은 `Range` 처리로 `206` / `416` 응답. `ETag`는 원본 내용의 SHA-256이며 파일 교체 시 스캔으로 갱신
-- 썸네일은 요청 시점에 생성해 디스크에 캐시. 생성 실패는 `404`이고 다음 요청에 다시 시도
-- 원본·썸네일 모두 `Cache-Control: private, max-age=604800`. 썸네일 `ETag`에는 규격 토큰이 붙어 크기·품질 변경 시 함께 무효화
-- 인덱스에 있어도 파일이 없으면 `404`
-- 서버 측 실시간 트랜스코딩 없음
+### 업로드 흐름
 
-**HEIC·HEIF 썸네일 미지원.** 배포 이미지의 ffmpeg가 6.1.1이고 HEIC 디먹싱은 7.1부터 추가됨.
-인덱싱·목록·원본 조회는 정상 동작하며 썸네일 요청만 `404` 응답.
+```text
+lookup
+  → 세션 생성
+  → 청크 전송
+  → commit
+```
 
-### 인덱싱
+- `lookup` 최대 200건
+- 기존 미디어 발견 시 `mediaId` 반환
+- 중복 미디어는 업로드 세션 생성 생략
 
-목록은 파일시스템 순회가 아닌 DB 인덱스 기반. DSM·SMB로 직접 투입한 파일은 백그라운드 스캐너가 따라감.
+### 세션 정책
 
-- 기동 직후 1회 실행 후 `Indexing:IntervalMinutes` 주기 반복
-- `.`으로 시작하는 디렉터리와 심볼릭 링크는 순회에서 제외
-- 확장자 화이트리스트: `.jpg` `.jpeg` `.png` `.gif` `.webp` `.heic` `.heif` `.mp4` `.mov` `.m4v`
-- 내용이 같은 파일은 한 번만 인덱싱
-- 촬영일시는 이미지 EXIF와 영상 QuickTime 메타에서 추출. 없으면 파일 mtime으로 대체
-  - 오프셋 정보가 없는 촬영일시에는 `Indexing:TimeZone` 적용
-- 해상도는 표시 방향 기준. 회전 정보를 반영해 교환
+- `Upload-Metadata` 필수 값
+  - `filename`
+  - `contentHash`
+- `contentHash`는 원본 SHA-256
+- 청크 크기는 클라이언트 결정
+- Cloudflare 요청 본문 상한 고려 시 5MB 청크 권장
+- 파일 전체 크기는 `Upload:MaxUploadSizeBytes` 이하로 제한
+- 크기 초과 시 `413`
+- 제한 초과 데이터 미기록
+- 스테이징 디렉터리는 갤러리 마운트 내부 구성
+- 다른 볼륨 사용 시 원자적 이동 실패 가능성 존재
+- 미완료 세션은 `Upload:SessionExpirationHours` 경과 후 정리
+- 허용 tus 확장은 `creation`, `termination`, `expiration` 세 가지
+  - `creation-defer-length`는 `Upload-Length` 없이 세션 생성이 가능해 업로드 크기 상한 검증을 우회할 수 있으므로 미지원
+  - `concatenation`은 부분 업로드 결합을 허용하지만 편입 로직이 단일 파일을 전제로 하므로 미지원
+
+### commit
+
+`commit` 단계에서 수행되는 검증 및 편입:
+
+1. 업로드 완료 여부 확인
+2. 선언된 크기와 실제 크기 비교
+3. 선언된 SHA-256과 실제 해시 비교
+4. 매직바이트 기반 파일 형식 판별
+5. 저장 확장자 결정
+6. 원본 트리 원자적 편입
+7. 미디어 인덱스 반영
+
+확장자는 클라이언트 파일명이 아닌 실제 파일 형식 기준 결정. 원본 파일명은 표시용 메타데이터로만 보관.
+
+저장 경로:
+
+```text
+Uploads/{YYYY}/{MM}/{yyyyMMdd_HHmmss}_{해시 앞 8자}.{ext}
+```
+
+경로의 연·월 및 시각은 촬영일시를 `Indexing:TimeZone` 기준 현지시각으로 변환한 값 사용.
+
+검증 실패 시 원본 트리 미편입.
+
+### 응답
+
+| 응답 | 조건 |
+| --- | --- |
+| `200 { mediaId, duplicate }` | 정상 편입 또는 중복 판정 |
+| `422` | 크기 또는 해시 불일치 |
+| `415` | 지원하지 않는 파일 형식 |
+| `409` | 전송 미완료 |
+| `404` | 업로드 세션 없음 |
+
+### 구현 참고
+
+`commit` 분리 이유:
+
+- tus 완료 `PATCH` 내부에서 애플리케이션 검증 실패 응답 전달 곤란
+- 이벤트에서 지정한 상태코드를 라이브러리가 `204`로 대체
+- 응답 본문 작성 시 마무리 단계 예외 발생
+
+파일 타입 판별 직접 구현 이유:
+
+- `ftyp` 박스가 없는 실제 QuickTime 파일 존재
+- 검토한 매직바이트 라이브러리의 해당 파일 판별 실패
+- 실제 파일 헤더 기반 회귀 테스트 유지
+
+## 삭제
+
+`DELETE /media/{id}` 기반 논리 삭제. `Editor` 권한 필요.
+
+삭제 처리:
+
+- 실제 삭제 대신 휴지통 이동
+- 이동 경로: `Upload:TrashDirectoryName/{yyyyMMdd}/{원래 상대 경로}`
+- 기존 상대 경로 구조 유지
+- 미디어 인덱스 즉시 제거
+- 이후 조회 `404`
+- 동일 내용 재업로드 허용
+- 썸네일 캐시 동시 제거
+- 대상 경로 정규화 후 갤러리 루트 하위 여부 검증
+- 동일 날짜·동일 경로 충돌 시 접미사 추가
+- 기존 휴지통 파일 보존
+
+감사 로그:
+
+- `MediaDeletions` 테이블 저장
+- 원본 경로
+- 휴지통 경로
+- 내용 해시
+- 파일 크기
+- 수행 계정
+- 삭제 시각
+- 실삭제 시각
+- HTTP API 미노출
+
+보존 기간 정리:
+
+- 스캔 주기 내 실행
+- `Upload:TrashRetentionDays` 경과 항목 대상
+- 감사 로그 기준 정리
+- 휴지통 전체 디렉터리 순회 미사용
+- 파일 삭제 후 빈 날짜 디렉터리 정리
+- 실삭제 완료 시각 기록
+
+복원 API 미제공. DSM·SMB를 통해 원래 위치로 복원 시 다음 스캔에서 재인덱싱. 복원 경로 확인은 감사 로그 기준.
 
 ## 설정
 
@@ -140,46 +373,61 @@ docker compose exec -it api dotnet FamilyGallery.Api.dll user add {계정명} --
 | `ConnectionStrings:Default` | SQLite 연결 문자열 | `Data Source=/data/app/family-gallery.db` |
 | `Jwt:Issuer` | 토큰 발급자 | `family-gallery-api` |
 | `Jwt:Audience` | 토큰 대상 | `family-gallery-app` |
-| `Jwt:SigningKey` | HMAC 서명 키 (32자 이상) | **없음. 반드시 외부 주입** |
-| `Jwt:AccessTokenMinutes` | access token 유효 시간(분) | `30` |
-| `Jwt:RefreshTokenDays` | refresh token 유효 기간(일) | `60` |
-| `Gallery:RootPath` | NAS 마운트 경로 (읽기·쓰기) | `/data/gallery` |
-| `Indexing:IntervalMinutes` | 스캔 주기(분) | `10` |
-| `Indexing:TimeZone` | 오프셋 태그가 없는 촬영일시에 적용할 표준시 | `Asia/Seoul` |
-| `Thumbnail:CachePath` | 썸네일 디스크 캐시 루트 | `/data/app/thumbnails` |
-| `Thumbnail:FfmpegPath` | ffmpeg 실행 파일 경로 | `ffmpeg` |
-| `Thumbnail:MaxConcurrency` | 동시 생성 수 상한 | `2` |
-| `Thumbnail:TimeoutSeconds` | 개별 생성 제한 시간(초) | `30` |
+| `Jwt:SigningKey` | HMAC 서명 키, 32자 이상 | 없음 |
+| `Jwt:AccessTokenMinutes` | access token 유효 시간 | `30` |
+| `Jwt:RefreshTokenDays` | refresh token 유효 기간 | `60` |
+| `Gallery:RootPath` | NAS 갤러리 마운트 경로 | `/data/gallery` |
+| `Indexing:IntervalMinutes` | 스캔 주기 | `10` |
+| `Indexing:TimeZone` | 오프셋 없는 촬영일시 기준 표준시 | `Asia/Seoul` |
+| `Upload:StagingDirectoryName` | 업로드 스테이징 디렉터리 | `.uploads` |
+| `Upload:TrashDirectoryName` | 휴지통 디렉터리 | `.trash` |
+| `Upload:MaxUploadSizeBytes` | 파일당 최대 업로드 크기 | `2147483648` |
+| `Upload:SessionExpirationHours` | 미완료 세션 보존 시간 | `24` |
+| `Upload:TrashRetentionDays` | 휴지통 보존 기간 | `30` |
+| `Thumbnail:CachePath` | 썸네일 캐시 경로 | `/data/app/thumbnails` |
+| `Thumbnail:FfmpegPath` | ffmpeg 실행 경로 | `ffmpeg` |
+| `Thumbnail:MaxConcurrency` | 최대 동시 썸네일 생성 수 | `2` |
+| `Thumbnail:TimeoutSeconds` | 썸네일 생성 제한 시간 | `30` |
 
-- `Jwt:SigningKey`는 설정 파일에 미포함. 운영은 환경변수 `Jwt__SigningKey`, 로컬은 user-secrets 사용
-- `ValidateOnStart` 적용. 필수 설정 누락 시 기동 단계에서 실패
+설정 정책:
+
+- `Jwt:SigningKey` 설정 파일 미포함
+- 운영 환경은 `Jwt__SigningKey` 환경변수 사용
+- 로컬 환경은 user-secrets 사용
+- `ValidateOnStart` 적용
+- 필수 설정 누락 시 애플리케이션 기동 실패
 
 ## 데이터베이스
 
-- SQLite. 스키마는 EF Core 마이그레이션으로 관리
-- 기동 시 마이그레이션 자동 적용. 단일 인스턴스 배포이므로 별도 적용 절차 없음
-- DB 파일의 상위 디렉터리는 기동 시 자동 생성. (SQLite가 직접 만들지 않아 최초 실행이 실패하는 것을 막음)
-- `journal_mode`는 명시 설정하지 않음. EF Core가 생성하는 SQLite DB는 WAL이 기본값
+- SQLite 사용
+- EF Core 마이그레이션 기반 스키마 관리
+- 애플리케이션 기동 시 마이그레이션 자동 적용
+- 단일 인스턴스 배포 전제의 별도 마이그레이션 단계 미운영
+- DB 상위 디렉터리 기동 시 자동 생성
+- `journal_mode` 별도 지정 없음
+- EF Core 생성 SQLite DB의 WAL 기본 사용
 
 ### 시각 값
 
-- 시각 값은 모두 UTC 기준 `DateTime`으로 저장·조회
-- SQLite의 `DateTimeOffset` 쿼리 제약을 피하기 위해 `DateTimeOffset`은 사용하지 않음
-- SQLite 조회 시 사라지는 UTC `Kind`는 `UtcDateTimeConverter`에서 복원
-- 모든 `DateTime` 속성에 공통 적용되어 JSON 응답의 UTC 표기(`Z`)를 일관되게 유지
+- 전체 시각 값 UTC 기준 `DateTime` 저장
+- `DateTimeOffset` 미사용
+- SQLite `DateTimeOffset` 쿼리 제약 회피 목적
+- SQLite 조회 과정에서 유실되는 UTC `Kind`를 `UtcDateTimeConverter`로 복원
+- 전체 `DateTime` 속성 공통 적용
+- JSON UTC 표기 `Z` 유지
 
-마이그레이션 추가:
+### 마이그레이션 추가
 
 ```powershell
 dotnet tool restore
 dotnet ef migrations add <이름> --project FamilyGallery.Api
 ```
 
-`dotnet-ef`는 로컬 도구로 버전 고정. 전역 설치 불필요.
+`dotnet-ef`는 로컬 도구 매니페스트로 버전 고정. 전역 설치 불필요.
 
 ## 로컬 실행
 
-서명 키를 user-secrets에 등록 (최초 1회).
+최초 1회 JWT 서명 키 등록:
 
 ```powershell
 cd FamilyGallery.Api
@@ -194,10 +442,23 @@ dotnet user-secrets set "Jwt:SigningKey" ([Convert]::ToBase64String($bytes))
 dotnet run --project FamilyGallery.Api
 ```
 
-- `http://localhost:5088/health` → `{"status":"ok","version":"..."}`
-- `http://localhost:5088/openapi/v1.json` (Development 전용)
+확인:
 
-Development 환경 기본값은 `Gallery:RootPath` = `./.local/gallery`, `Thumbnail:CachePath` = `./.local/thumbnails`, SQLite = `./.local/family-gallery.db`. `.local/`은 git 제외 대상이며 기동 시 자동 생성. 소스 폴더 `Data/`와 대소문자만 다른 `data/`는 Windows git이 함께 무시하므로 미사용.
+- `http://localhost:5088/health`
+- `http://localhost:5088/openapi/v1.json`
+  - Development 환경 전용
+
+Development 기본 경로:
+
+| 항목 | 경로 |
+| --- | --- |
+| Gallery | `./.local/gallery` |
+| Thumbnail | `./.local/thumbnails` |
+| SQLite | `./.local/family-gallery.db` |
+
+`.local/`은 Git 제외 대상이며 기동 시 자동 생성.
+
+Windows Git의 대소문자 처리로 소스 디렉터리 `Data/`와 충돌할 수 있는 `data/` 경로 미사용.
 
 ## 테스트
 
@@ -205,34 +466,61 @@ Development 환경 기본값은 `Gallery:RootPath` = `./.local/gallery`, `Thumbn
 dotnet test --solution FamilyGallery.slnx
 ```
 
-- xUnit v3 기반 통합 테스트. `WebApplicationFactory`로 테스트 호스트를 띄워 실제 HTTP 파이프라인 검증
-- 테스트 클래스마다 임시 파일 SQLite를 생성하고 마이그레이션까지 적용. DB와 요청 빈도 제한 상태가 클래스 간에 섞이지 않음
-- xUnit v3의 Microsoft.Testing.Platform 지원을 사용하며, `dotnet test`도 같은 러너를 사용하도록 `global.json`에서 지정
-- 테스트 프로젝트는 `Dockerfile`의 게시 대상이 아니므로 배포 이미지에 포함되지 않음
-- 썸네일 테스트는 `PATH`의 ffmpeg 필요. 그 외 테스트는 바이트를 직접 조립해 ffmpeg 없이 실행
+테스트 구성:
 
-## 배포 (Synology NAS)
+- xUnit v3 기반 통합 테스트
+- `WebApplicationFactory` 기반 실제 HTTP 파이프라인 검증
+- 테스트 클래스별 임시 SQLite DB 생성
+- 테스트 DB별 EF Core 마이그레이션 적용
+- 테스트 클래스 간 DB 상태 및 rate limit 상태 격리
+- Microsoft.Testing.Platform 사용
+- `global.json`을 통한 `dotnet test` 러너 고정
+- 테스트 프로젝트의 배포 이미지 제외
+- 썸네일 테스트만 로컬 ffmpeg 필요
+- 기타 미디어 테스트는 직접 조립한 바이트 기반 실행
 
-`docker-compose.yml`과 같은 위치에 `.env` 배치 후 서명 키 지정.
+## 배포
 
-```
+Synology NAS의 Docker Compose 기반 단일 인스턴스 배포.
+
+### 환경변수
+
+`docker-compose.yml`과 동일 경로에 `.env` 생성:
+
+```env
 JWT_SIGNING_KEY=<32자 이상 랜덤 문자열>
 ```
+
+### 실행
 
 ```bash
 docker compose up -d --build
 ```
 
-마운트:
+### 마운트
 
-- `/volume2/family-gallery` → `/data/gallery` (원본, 읽기·쓰기)
-- `/volume2/docker/family-gallery-api/data` → `/data/app` (SQLite DB 및 썸네일 캐시)
+| Synology 경로 | 컨테이너 경로 | 용도 |
+| --- | --- | --- |
+| `/volume2/family-gallery` | `/data/gallery` | 원본 미디어 |
+| `/volume2/docker/family-gallery-api/data` | `/data/app` | SQLite DB, 썸네일 캐시 |
 
-- 컨테이너는 비root 계정(uid 1654)으로 실행되며, 두 마운트 경로 모두 해당 uid에 대한 쓰기 권한이 필요
-  - 이미지에 `/data/app`, `/data/gallery` 디렉터리를 미리 생성하므로 named volume은 해당 uid 소유로 초기화됨
-  - bind mount는 호스트 디렉터리의 권한이 우선하므로 DSM에서 별도 권한 설정 필요
-  - 쓰기 권한이 없으면 기동 단계에서 `SQLite 데이터베이스에 쓸 수 없습니다` 오류로 중단
-- 외부 노출은 Cloudflare Tunnel 단일 경로로 구성하며, 컨테이너 포트는 호스트 loopback에만 바인딩
+### 권한
+
+- 컨테이너 비root 실행
+- 실행 uid `1654`
+- `/data/gallery`, `/data/app` 쓰기 권한 필요
+- 이미지 내부 디렉터리 사전 생성
+- named volume 사용 시 uid `1654` 기준 초기화
+- bind mount 사용 시 호스트 디렉터리 권한 우선
+- DSM에서 별도 쓰기 권한 설정 필요
+- DB 쓰기 권한 부재 시 기동 단계 실패
+- 오류 메시지: `SQLite 데이터베이스에 쓸 수 없습니다`
+
+### 외부 노출
+
+- Cloudflare Tunnel 단일 진입 경로
+- 컨테이너 포트는 호스트 loopback에만 바인딩
+- NAS 포트 직접 외부 노출 미사용
 
 ## 라이선스
 

@@ -89,6 +89,20 @@ public sealed class ThumbnailService
         }
     }
 
+    /// <summary>캐시된 썸네일 정리.</summary>
+    public void DeleteCached(string contentHash)
+    {
+        try
+        {
+            File.Delete(ResolveCachePath(contentHash));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 조회 경로가 원본 존재 여부를 먼저 확인하므로 남아도 잘못된 응답으로 이어지지 않음.
+            _logger.LogWarning(ex, "썸네일 캐시를 지우지 못했습니다: {ContentHash}", contentHash);
+        }
+    }
+
     private async Task<string?> CreateAsync(MediaItem item, string sourcePath, string cachePath)
     {
         // 요청자의 취소 토큰과 분리. 제한 시간만 생성 작업을 중단시킴.
