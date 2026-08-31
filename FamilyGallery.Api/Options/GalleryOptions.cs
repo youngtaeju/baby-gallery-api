@@ -13,7 +13,13 @@ public sealed class GalleryOptions
     /// <summary>상대 경로를 절대 경로로 정규화. 갤러리 루트 하위가 아니면 false.</summary>
     public bool TryResolveMediaPath(string relativePath, out string fullPath)
     {
-        var root = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(RootPath));
+        return TryResolveUnder(RootPath, relativePath, out fullPath);
+    }
+
+    /// <summary>지정한 루트 하위로 상대 경로를 정규화. 벗어나면 false. 휴지통 정리도 같은 검증을 사용.</summary>
+    public static bool TryResolveUnder(string rootPath, string relativePath, out string fullPath)
+    {
+        var root = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(rootPath));
 
         fullPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, relativePath));
 

@@ -1,11 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FamilyGallery.Api.Data;
 using FamilyGallery.Api.Data.Entities;
 using FamilyGallery.Api.Options;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -83,6 +86,114 @@ public sealed class MediaTrashService(
         return true;
     }
 
+    /// <summary>보존 기간이 지난 휴지통 항목을 실삭제. 처리한 건수 반환.</summary>
+    public async Task<int> PurgeExpiredAsync(CancellationToken cancellationToken)
+    {
+        var options = uploadOptions.Value;
+        var cutoff = DateTime.UtcNow.AddDays(-options.TrashRetentionDays);
+
+        // 디렉터리 순회가 아닌 감사 로그 기준. 날짜 폴더명은 현지시각이라 DeletedAt과 하루 어긋날 수 있음.
+        var expired = await db.MediaDeletions
+            .Where(d => d.PurgedAt == null && d.DeletedAt < cutoff)
+            .ToListAsync(cancellationToken);
+
+        if (expired.Count == 0)
+        {
+            return 0;
+        }
+
+        var trashRoot = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(options.ResolveTrashPath(galleryOptions.Value.RootPath)));
+
+        var purgedAt = DateTime.UtcNow;
+        var emptied = new HashSet<string>(StringComparer.Ordinal);
+        var purged = 0;
+
+        foreach (var deletion in expired)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!GalleryOptions.TryResolveUnder(trashRoot, deletion.TrashRelativePath, out var fullPath))
+            {
+                // 잘못된 휴지통 경로를 삭제 완료로 기록하지 않고 재처리 대상으로 유지.
+                // 반복 오류 로그를 통한 데이터 이상 감지.
+                logger.LogError(
+                    "휴지통 루트 밖을 가리키는 기록입니다: {TrashRelativePath}",
+                    deletion.TrashRelativePath);
+
+                continue;
+            }
+
+            if (!TryDeleteFile(fullPath))
+            {
+                continue;
+            }
+
+            emptied.Add(Path.GetDirectoryName(fullPath)!);
+            deletion.PurgedAt = purgedAt;
+            purged++;
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        RemoveEmptyDirectories(trashRoot, emptied);
+
+        logger.LogInformation("휴지통 정리 완료. {Purged}건 실삭제.", purged);
+
+        return purged;
+    }
+
+    private bool TryDeleteFile(string fullPath)
+    {
+        if (!File.Exists(fullPath))
+        {
+            return true;
+        }
+
+        try
+        {
+            File.Delete(fullPath);
+
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "휴지통 파일을 지우지 못했습니다: {FullName}", fullPath);
+
+            return false;
+        }
+    }
+
+    private void RemoveEmptyDirectories(string trashRoot, HashSet<string> directories)
+    {
+        foreach (var directory in directories)
+        {
+            var current = directory;
+
+            // 상위 날짜 폴더까지 순차 정리하고 휴지통 루트는 유지.
+            while (current.StartsWith(trashRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                try
+                {
+                    if (Directory.EnumerateFileSystemEntries(current).Any())
+                    {
+                        break;
+                    }
+
+                    Directory.Delete(current);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogWarning(ex, "빈 휴지통 디렉터리를 지우지 못했습니다: {Path}", current);
+
+                    break;
+                }
+
+                current = Path.GetDirectoryName(current)!;
+            }
+        }
+    }
+
     private bool TryResolveTrashPath(string trashRoot, string relativePath, out string targetPath)
     {
         var folder = timeZone.ToLocal(DateTime.UtcNow).ToString("yyyyMMdd", CultureInfo.InvariantCulture);
@@ -94,7 +205,7 @@ public sealed class MediaTrashService(
         var baseName = Path.GetFileNameWithoutExtension(basePath);
         var extension = Path.GetExtension(basePath);
 
-        // 삭제 후 같은 경로에 다시 올렸다가 같은 날 또 지우면 겹침. 덮어쓰면 먼저 지운 원본이 사라짐.
+        // 동일 날짜, 경로의 재삭제 시 기존 휴지통 파일 덮어쓰기 방지.
         for (var attempt = 2; File.Exists(targetPath); attempt++)
         {
             if (attempt > MaxNameAttempts)

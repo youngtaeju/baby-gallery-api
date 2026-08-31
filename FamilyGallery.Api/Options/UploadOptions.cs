@@ -16,6 +16,10 @@ public sealed class UploadOptions
     [Range(1024, 8L * 1024 * 1024 * 1024)]
     public long MaxUploadSizeBytes { get; init; } = 2L * 1024 * 1024 * 1024;
 
+    // 휴지통 보존 기간. 경과분은 인덱싱 주기에 실삭제.
+    [Range(1, 365)]
+    public int TrashRetentionDays { get; init; } = 30;
+
     // 미완료 세션 보존 기간. 경과분은 인덱싱 주기에 정리.
     [Range(1, 168)]
     public int SessionExpirationHours { get; init; } = 24;

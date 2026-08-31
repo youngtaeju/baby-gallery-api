@@ -6,12 +6,15 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using tusdotnet.Interfaces;
 
 namespace FamilyGallery.Api.Services;
 
-// DSM·SMB로 직접 투입된 파일을 주기 스캔으로 따라감. API 업로드분은 편입 시점에 별도 등록.
+// 외부에서 직접 등록된 파일 인덱싱과 휴지통 및 만료 업로드 정리를 주기적으로 직렬 수행.
+// API 업로드는 편입 시 별도 등록.
 public sealed class MediaIndexingService(
     IServiceScopeFactory scopeFactory,
+    ITusStore store,
     IOptions<IndexingOptions> options,
     ILogger<MediaIndexingService> logger) : BackgroundService
 {
@@ -21,10 +24,12 @@ public sealed class MediaIndexingService(
 
         try
         {
-            // 기동 직후 1회 실행 후 주기 반복.
+            // 서비스 시작 직후 1회 실행 후 주기적 반복
             do
             {
                 await ScanAsync(stoppingToken);
+                await PurgeTrashAsync(stoppingToken);
+                await RemoveExpiredUploadsAsync(stoppingToken);
             }
             while (await timer.WaitForNextTickAsync(stoppingToken));
         }
@@ -56,8 +61,47 @@ public sealed class MediaIndexingService(
         }
         catch (Exception ex)
         {
-            // 한 주기의 실패가 이후 주기를 막지 않도록 격리.
             logger.LogError(ex, "미디어 스캔 중 오류가 발생했습니다.");
+        }
+    }
+
+    private async Task PurgeTrashAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+
+            await scope.ServiceProvider.GetRequiredService<MediaTrashService>()
+                .PurgeExpiredAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "휴지통 정리 중 오류가 발생했습니다.");
+        }
+    }
+
+    private async Task RemoveExpiredUploadsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var removed = await ((ITusExpirationStore)store).RemoveExpiredFilesAsync(cancellationToken);
+
+            if (removed > 0)
+            {
+                logger.LogInformation("만료된 업로드 세션 {Removed}건을 정리했습니다.", removed);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "만료된 업로드 세션 정리 중 오류가 발생했습니다.");
         }
     }
 }

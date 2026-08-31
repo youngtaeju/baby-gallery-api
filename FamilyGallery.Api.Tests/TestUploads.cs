@@ -28,15 +28,7 @@ internal static class TestUploads
             $"filename {Convert.ToBase64String(Encoding.UTF8.GetBytes(fileName))}",
             $"contentHash {Convert.ToBase64String(Encoding.UTF8.GetBytes(declaredHash ?? Sha256(content)))}");
 
-        var creation = new HttpRequestMessage(HttpMethod.Post, "/media/uploads");
-
-        creation.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0");
-        creation.Headers.TryAddWithoutValidation(
-            "Upload-Length",
-            content.Length.ToString(CultureInfo.InvariantCulture));
-        creation.Headers.TryAddWithoutValidation("Upload-Metadata", metadata);
-
-        var created = await client.SendAsync(creation, TestToken);
+        var created = await SendCreationAsync(client, content.Length, metadata);
 
         created.EnsureSuccessStatusCode();
 
@@ -57,6 +49,30 @@ internal static class TestUploads
             $"{created.Headers.Location!.OriginalString}/commit",
             content: null,
             TestToken);
+    }
+
+    /// <summary>전송 없이 세션만 생성. 만료 정리 검증에 사용.</summary>
+    public static Task<HttpResponseMessage> CreateSessionAsync(HttpClient client, long uploadLength, string fileName)
+    {
+        var metadata = string.Join(
+            ",",
+            $"filename {Convert.ToBase64String(Encoding.UTF8.GetBytes(fileName))}",
+            $"contentHash {Convert.ToBase64String(Encoding.UTF8.GetBytes(new string('a', 64)))}");
+
+        return SendCreationAsync(client, uploadLength, metadata);
+    }
+
+    private static Task<HttpResponseMessage> SendCreationAsync(HttpClient client, long uploadLength, string metadata)
+    {
+        var creation = new HttpRequestMessage(HttpMethod.Post, "/media/uploads");
+
+        creation.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0");
+        creation.Headers.TryAddWithoutValidation(
+            "Upload-Length",
+            uploadLength.ToString(CultureInfo.InvariantCulture));
+        creation.Headers.TryAddWithoutValidation("Upload-Metadata", metadata);
+
+        return client.SendAsync(creation, TestToken);
     }
 
     public static string Sha256(byte[] content)

@@ -15,6 +15,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using tusdotnet.Interfaces;
 
 namespace FamilyGallery.Api.Tests;
 
@@ -44,6 +45,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly long? _maxUploadSizeBytes;
 
+    private readonly int? _trashRetentionDays;
+
     // xUnit의 IClassFixture는 무인자 생성자만 활성화 가능. 선택적 매개변수로는 대체되지 않음.
     public ApiFactory()
         : this(null)
@@ -52,10 +55,11 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     // 촬영일시 해석과 업로드 상한은 구성값에 좌우되면 안 됨. 필요한 테스트만 값을 명시.
     // IClassFixture는 public 생성자가 하나뿐이어야 하므로 internal로 노출.
-    internal ApiFactory(string? timeZone, long? maxUploadSizeBytes = null)
+    internal ApiFactory(string? timeZone, long? maxUploadSizeBytes = null, int? trashRetentionDays = null)
     {
         _timeZone = timeZone;
         _maxUploadSizeBytes = maxUploadSizeBytes;
+        _trashRetentionDays = trashRetentionDays;
 
         _rootPath = Path.Combine(Path.GetTempPath(), $"fg-test-{Guid.NewGuid():N}");
         GalleryPath = Path.Combine(_rootPath, "gallery");
@@ -104,6 +108,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         if (_timeZone is not null)
         {
             overrides["Indexing:TimeZone"] = _timeZone;
+        }
+
+        if (_trashRetentionDays is not null)
+        {
+            overrides["Upload:TrashRetentionDays"] =
+                _trashRetentionDays.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         if (_maxUploadSizeBytes is not null)
@@ -200,6 +210,50 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         return await db.MediaDeletions.AsNoTracking().ToListAsync();
+    }
+
+    // 보존 기간 판정은 DeletedAt 기준. 삭제 엔드포인트를 거치지 않고 시각을 직접 지정.
+    public async Task AddDeletionAsync(string trashRelativePath, DateTime deletedAt)
+    {
+        using var scope = Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        db.MediaDeletions.Add(new MediaDeletion
+        {
+            ContentHash = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"),
+            OriginalRelativePath = "IMG_0001.JPG",
+            TrashRelativePath = trashRelativePath,
+            OriginalFileName = "IMG_0001.JPG",
+            FileSize = 1024,
+            DeletedByUserId = 1,
+            DeletedByUsername = "tester",
+            DeletedAt = deletedAt
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    // 보존 기간 정리 검증도 주기가 아닌 명시적 1회 실행으로 수행.
+    public async Task<int> PurgeTrashAsync()
+    {
+        using var scope = Services.CreateScope();
+
+        return await scope.ServiceProvider.GetRequiredService<MediaTrashService>()
+            .PurgeExpiredAsync(CancellationToken.None);
+    }
+
+    public async Task ExpireUploadAsync(string fileId, DateTimeOffset expiresAt)
+    {
+        var store = (ITusExpirationStore)Services.GetRequiredService<ITusStore>();
+
+        await store.SetExpirationAsync(fileId, expiresAt, CancellationToken.None);
+    }
+
+    public async Task<int> RemoveExpiredUploadsAsync()
+    {
+        var store = (ITusExpirationStore)Services.GetRequiredService<ITusStore>();
+
+        return (await store.RemoveExpiredFilesAsync(CancellationToken.None));
     }
 
     // 인덱싱 동작 검증은 백그라운드 주기가 아닌 명시적 1회 실행으로 수행.
