@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="BabyGallery.Api/BabyGallery.Api.csproj" />
+  <Project Path="BabyGallery.Api.Tests/BabyGallery.Api.Tests.csproj" />
+</Solution>

@@ -1,4 +1,4 @@
-# family-gallery-api
+# baby-gallery-api
 
 가정용 Synology NAS의 이미지·영상을 가족 구성원에게 제공하기 위한 전용 API.
 
@@ -6,7 +6,7 @@
 - `Editor` 권한 사용자만 업로드·삭제 허용
 - 원본 수정 미지원, 신규 추가 및 휴지통 기반 삭제만 허용
 - Cloudflare Tunnel 단일 경로를 통한 외부 노출
-- Flutter 클라이언트 `family-gallery-app` 전용
+- Flutter 클라이언트 `baby-gallery-app` 전용
 
 ## 요구 사항
 
@@ -24,9 +24,9 @@
 .config/
   dotnet-tools.json   로컬 도구 매니페스트 (dotnet-ef)
 global.json           dotnet test 러너 지정
-FamilyGallery.slnx
+BabyGallery.slnx
 
-FamilyGallery.Api/
+BabyGallery.Api/
   Program.cs          서비스 등록, HTTP 파이프라인, DB 초기화
   Options/            Jwt, Gallery, Indexing, Thumbnail, Upload 설정
   Data/               AppDbContext, 엔티티, 값 변환기
@@ -35,7 +35,7 @@ FamilyGallery.Api/
   Services/           인증, 인덱싱, 타입 판별, 업로드 편입, 휴지통, 썸네일
   Cli/                계정 관리 명령
 
-FamilyGallery.Api.Tests/
+BabyGallery.Api.Tests/
   ApiFactory.cs       테스트 호스트 및 임시 DB
   MediaFixtures.cs    JPEG·MP4 테스트 데이터
   FfmpegFixtures.cs   디코딩 가능한 테스트 미디어
@@ -138,13 +138,13 @@ user set-password <username>
 로컬 실행:
 
 ```powershell
-dotnet run --project FamilyGallery.Api -- user add {계정명} --display-name "{표시 이름}" --role editor
+dotnet run --project BabyGallery.Api -- user add {계정명} --display-name "{표시 이름}" --role editor
 ```
 
 컨테이너 실행:
 
 ```bash
-docker compose exec -it api dotnet FamilyGallery.Api.dll user add {계정명} --display-name "{표시 이름}" --role editor
+docker compose exec -it api dotnet BabyGallery.Api.dll user add {계정명} --display-name "{표시 이름}" --role editor
 ```
 
 비밀번호 입력을 위한 `-it` 옵션 필요.
@@ -370,9 +370,9 @@ Uploads/{YYYY}/{MM}/{yyyyMMdd_HHmmss}_{해시 앞 8자}.{ext}
 
 | 키 | 설명 | 기본값 |
 | --- | --- | --- |
-| `ConnectionStrings:Default` | SQLite 연결 문자열 | `Data Source=/data/app/family-gallery.db` |
-| `Jwt:Issuer` | 토큰 발급자 | `family-gallery-api` |
-| `Jwt:Audience` | 토큰 대상 | `family-gallery-app` |
+| `ConnectionStrings:Default` | SQLite 연결 문자열 | `Data Source=/data/app/baby-gallery.db` |
+| `Jwt:Issuer` | 토큰 발급자 | `baby-gallery-api` |
+| `Jwt:Audience` | 토큰 대상 | `baby-gallery-app` |
 | `Jwt:SigningKey` | HMAC 서명 키, 32자 이상 | 없음 |
 | `Jwt:AccessTokenMinutes` | access token 유효 시간 | `30` |
 | `Jwt:RefreshTokenDays` | refresh token 유효 기간 | `60` |
@@ -420,7 +420,7 @@ Uploads/{YYYY}/{MM}/{yyyyMMdd_HHmmss}_{해시 앞 8자}.{ext}
 
 ```powershell
 dotnet tool restore
-dotnet ef migrations add <이름> --project FamilyGallery.Api
+dotnet ef migrations add <이름> --project BabyGallery.Api
 ```
 
 `dotnet-ef`는 로컬 도구 매니페스트로 버전 고정. 전역 설치 불필요.
@@ -430,7 +430,7 @@ dotnet ef migrations add <이름> --project FamilyGallery.Api
 최초 1회 JWT 서명 키 등록:
 
 ```powershell
-cd FamilyGallery.Api
+cd BabyGallery.Api
 $bytes = New-Object byte[] 48
 [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
 dotnet user-secrets set "Jwt:SigningKey" ([Convert]::ToBase64String($bytes))
@@ -439,7 +439,7 @@ dotnet user-secrets set "Jwt:SigningKey" ([Convert]::ToBase64String($bytes))
 실행:
 
 ```powershell
-dotnet run --project FamilyGallery.Api
+dotnet run --project BabyGallery.Api
 ```
 
 확인:
@@ -454,7 +454,7 @@ Development 기본 경로:
 | --- | --- |
 | Gallery | `./.local/gallery` |
 | Thumbnail | `./.local/thumbnails` |
-| SQLite | `./.local/family-gallery.db` |
+| SQLite | `./.local/baby-gallery.db` |
 
 `.local/`은 Git 제외 대상이며 기동 시 자동 생성.
 
@@ -463,7 +463,7 @@ Windows Git의 대소문자 처리로 소스 디렉터리 `Data/`와 충돌할 �
 ## 테스트
 
 ```powershell
-dotnet test --solution FamilyGallery.slnx
+dotnet test --solution BabyGallery.slnx
 ```
 
 테스트 구성:
@@ -501,8 +501,8 @@ docker compose up -d --build
 
 | Synology 경로 | 컨테이너 경로 | 용도 |
 | --- | --- | --- |
-| `/volume2/family-gallery` | `/data/gallery` | 원본 미디어 |
-| `/volume2/docker/family-gallery-api/data` | `/data/app` | SQLite DB, 썸네일 캐시 |
+| `/volume2/baby-gallery` | `/data/gallery` | 원본 미디어 |
+| `/volume2/docker/baby-gallery-api/data` | `/data/app` | SQLite DB, 썸네일 캐시 |
 
 ### 권한
 

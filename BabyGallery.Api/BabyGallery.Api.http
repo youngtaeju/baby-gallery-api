@@ -1,0 +1,43 @@
+@BabyGallery.Api_HostAddress = http://localhost:5088
+@accessToken = 
+@refreshToken = 
+
+GET {{BabyGallery.Api_HostAddress}}/health
+Accept: application/json
+
+###
+
+POST {{BabyGallery.Api_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "youngtae",
+  "password": ""
+}
+
+###
+
+GET {{BabyGallery.Api_HostAddress}}/auth/me
+Authorization: Bearer {{accessToken}}
+Accept: application/json
+
+###
+
+POST {{BabyGallery.Api_HostAddress}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refreshToken}}"
+}
+
+###
+
+POST {{BabyGallery.Api_HostAddress}}/auth/logout
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refreshToken}}"
+}
+
+###

@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="FamilyGallery.Api/FamilyGallery.Api.csproj" />
-  <Project Path="FamilyGallery.Api.Tests/FamilyGallery.Api.Tests.csproj" />
-</Solution>
