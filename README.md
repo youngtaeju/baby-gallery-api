@@ -6,7 +6,7 @@
 - `Editor` 권한 사용자만 업로드·삭제 허용
 - 원본 수정 미지원, 신규 추가 및 휴지통 기반 삭제만 허용
 - Cloudflare Tunnel 단일 경로를 통한 외부 노출
-- Flutter 클라이언트 `family-gallery-app` 전용
+- Flutter 클라이언트 `baby-gallery-app` 전용
 
 ## 요구 사항
 
@@ -370,9 +370,9 @@ Uploads/{YYYY}/{MM}/{yyyyMMdd_HHmmss}_{해시 앞 8자}.{ext}
 
 | 키 | 설명 | 기본값 |
 | --- | --- | --- |
-| `ConnectionStrings:Default` | SQLite 연결 문자열 | `Data Source=/data/app/family-gallery.db` |
-| `Jwt:Issuer` | 토큰 발급자 | `family-gallery-api` |
-| `Jwt:Audience` | 토큰 대상 | `family-gallery-app` |
+| `ConnectionStrings:Default` | SQLite 연결 문자열 | `Data Source=/data/app/baby-gallery.db` |
+| `Jwt:Issuer` | 토큰 발급자 | `baby-gallery-api` |
+| `Jwt:Audience` | 토큰 대상 | `baby-gallery-app` |
 | `Jwt:SigningKey` | HMAC 서명 키, 32자 이상 | 없음 |
 | `Jwt:AccessTokenMinutes` | access token 유효 시간 | `30` |
 | `Jwt:RefreshTokenDays` | refresh token 유효 기간 | `60` |
@@ -454,7 +454,7 @@ Development 기본 경로:
 | --- | --- |
 | Gallery | `./.local/gallery` |
 | Thumbnail | `./.local/thumbnails` |
-| SQLite | `./.local/family-gallery.db` |
+| SQLite | `./.local/baby-gallery.db` |
 
 `.local/`은 Git 제외 대상이며 기동 시 자동 생성.
 
@@ -501,8 +501,8 @@ docker compose up -d --build
 
 | Synology 경로 | 컨테이너 경로 | 용도 |
 | --- | --- | --- |
-| `/volume2/family-gallery` | `/data/gallery` | 원본 미디어 |
-| `/volume2/docker/family-gallery-api/data` | `/data/app` | SQLite DB, 썸네일 캐시 |
+| `/volume2/baby-gallery` | `/data/gallery` | 원본 미디어 |
+| `/volume2/docker/baby-gallery-api/data` | `/data/app` | SQLite DB, 썸네일 캐시 |
 
 ### 권한
 

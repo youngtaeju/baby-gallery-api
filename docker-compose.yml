@@ -1,17 +1,17 @@
 services:
   api:
     build: .
-    image: family-gallery-api:latest
-    container_name: family-gallery-api
+    image: baby-gallery-api:latest
+    container_name: baby-gallery-api
     restart: unless-stopped
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       Jwt__SigningKey: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY 미설정}
     volumes:
       # NAS 원본. 업로드 스테이징(.uploads/)과 휴지통(.trash/)이 같은 마운트 안에 있어야 원자적 rename 가능.
-      - /volume2/family-gallery:/data/gallery
+      - /volume2/baby-gallery:/data/gallery
       # SQLite / 썸네일 캐시 영역. 원본 볼륨과 분리.
-      - /volume2/docker/family-gallery-api/data:/data/app
+      - /volume2/docker/baby-gallery-api/data:/data/app
     ports:
       # 외부 노출은 Cloudflare Tunnel 단일 경로. 호스트 loopback으로만 바인딩.
       - "127.0.0.1:8080:8080"
