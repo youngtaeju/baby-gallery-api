@@ -481,7 +481,7 @@ $RECYCLE.BIN/
 # Vim temporary swap files
 *.swp
 
-# family-gallery
+# baby-gallery
 # 로컬 개발용 SQLite / 미디어 테스트 폴더
 # 소스 폴더 Data/ 와 겹치지 않도록 .local/ 사용 (Windows git은 대소문자 무시 매칭)
 .local/
